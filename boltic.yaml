@@ -14,7 +14,7 @@ deploy:
   maxInstances: 2
   resources:
     cpu: "2"
-    memory: "4Gi"
+    memory: "6Gi"
 
 environment:
   - name: PORT
@@ -25,6 +25,12 @@ environment:
     value: "0.0.0.0:11434"
   - name: PYTHONUNBUFFERED
     value: "1"
+  - name: OLLAMA_FLASH_ATTENTION
+    value: "1"
+  - name: OLLAMA_KEEP_ALIVE
+    value: "0"
+  - name: GOMEMLIMIT
+    value: "4500MiB"
 
 health:
   path: /health
