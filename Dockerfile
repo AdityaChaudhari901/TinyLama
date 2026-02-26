@@ -41,7 +41,7 @@ COPY --from=frontend-builder /app/frontend/dist ./dist
 
 # Runtime environment
 ENV PORT=8080 \
-    MODEL=llama3.2:1b \
+    MODEL=tinyllama:1.1b \
     OLLAMA_HOST=127.0.0.1:11434 \
     PYTHONUNBUFFERED=1
 

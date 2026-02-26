@@ -20,7 +20,7 @@ environment:
   - name: PORT
     value: "8080"
   - name: MODEL
-    value: "llama3.2:1b"
+    value: "tinyllama:1.1b"
   - name: OLLAMA_HOST
     value: "127.0.0.1:11434"
   - name: PYTHONUNBUFFERED
