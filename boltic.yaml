@@ -31,4 +31,6 @@ environment:
     value: "0"
   - name: GOMEMLIMIT
     value: "4500MiB"
-
+  # Override Ollama's internal free memory check (which fails on Serverless)
+  - name: OLLAMA_MAX_VRAM
+    value: "4294967296" # 4GB in bytes
