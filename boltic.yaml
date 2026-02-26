@@ -34,3 +34,6 @@ environment:
   # Override Ollama's internal free memory check (which fails on Serverless)
   - name: OLLAMA_MAX_VRAM
     value: "4294967296" # 4GB in bytes
+  # Force pure CPU computation (avoids crashing on missing AVX instructions in serverless VM)
+  - name: OLLAMA_LLM_LIBRARY
+    value: "cpu"
