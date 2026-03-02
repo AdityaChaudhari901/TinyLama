@@ -73,6 +73,20 @@ const BotIcon = () => (
     </svg>
 )
 
+const SettingsIcon = () => (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="3" />
+        <path d="M12 1v6m0 6v6M5.6 5.6l4.2 4.2m4.4 4.4l4.2 4.2M1 12h6m6 0h6M5.6 18.4l4.2-4.2m4.4-4.4l4.2-4.2" />
+    </svg>
+)
+
+const CloseIcon = () => (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18" />
+        <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+)
+
 
 function TypingDots() {
     return (
@@ -99,12 +113,25 @@ export default function App() {
     const [input, setInput] = useState('')
     const [messages, setMessages] = useState([])
     const [loading, setLoading] = useState(false)
+    const [showSettings, setShowSettings] = useState(false)
+    const [personality, setPersonality] = useState('helpful')
+    const [customPrompt, setCustomPrompt] = useState('You are a helpful AI assistant.')
     const textareaRef = useRef(null)
     const bottomRef = useRef(null)
     const abortRef = useRef(null)
     const fileRef = useRef(null)
 
     const isHome = messages.length === 0
+
+    // Personality presets
+    const personalities = {
+        helpful: "You are a helpful, friendly, and professional AI assistant. You provide clear and concise answers. You are respectful and positive. If you don't know something, you admit it honestly.",
+        creative: "You are a creative and imaginative AI assistant. You think outside the box and provide unique perspectives. You're enthusiastic and inspiring in your responses.",
+        technical: "You are a technical and precise AI assistant. You provide detailed, accurate information with technical depth. You use proper terminology and explain complex concepts clearly.",
+        casual: "You are a casual and conversational AI assistant. You're friendly and approachable, using everyday language. You keep things simple and fun while still being helpful.",
+        professional: "You are a professional business AI assistant. You provide structured, formal responses with attention to detail. You're efficient and results-oriented.",
+        custom: customPrompt
+    }
 
     // Auto-resize textarea
     useEffect(() => {
@@ -138,11 +165,17 @@ export default function App() {
             const res = await fetch(`${API_URL}/ask`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ question }),
+                body: JSON.stringify({ 
+                    question,
+                    personality: personality === 'custom' ? customPrompt : personalities[personality]
+                }),
                 signal: controller.signal,
             })
 
-            if (!res.ok) throw new Error(`Server error ${res.status}`)
+            if (!res.ok) {
+                const error = await res.json().catch(() => ({}))
+                throw new Error(error.detail || `Server error ${res.status}`)
+            }
             const data = await res.json()
 
             setMessages(prev => {
@@ -152,11 +185,14 @@ export default function App() {
             })
         } catch (err) {
             if (err.name === 'AbortError') return
+            const errorMsg = err.message.includes('detail') 
+                ? err.message 
+                : '⚠️ Could not reach the server. Check the backend is running.'
             setMessages(prev => {
                 const next = [...prev]
                 next[next.length - 1] = {
                     role: 'assistant',
-                    content: '⚠️ Could not reach the server. Check the backend is running.',
+                    content: errorMsg,
                     id: Date.now() + 3,
                 }
                 return next
@@ -197,6 +233,74 @@ export default function App() {
 
     return (
         <div className="app">
+            {/* Settings button - top left */}
+            <button 
+                className="settings-btn" 
+                onClick={() => setShowSettings(true)}
+                title="Settings"
+            >
+                <SettingsIcon />
+            </button>
+
+            {/* Settings Modal */}
+            {showSettings && (
+                <div className="modal-overlay" onClick={() => setShowSettings(false)}>
+                    <div className="modal" onClick={(e) => e.stopPropagation()}>
+                        <div className="modal__header">
+                            <h2>AI Personality</h2>
+                            <button className="modal__close" onClick={() => setShowSettings(false)}>
+                                <CloseIcon />
+                            </button>
+                        </div>
+                        <div className="modal__content">
+                            <p className="modal__description">
+                                Choose how the AI assistant responds to you:
+                            </p>
+                            <div className="personality-grid">
+                                {Object.keys(personalities).filter(k => k !== 'custom').map(key => (
+                                    <button
+                                        key={key}
+                                        className={`personality-card ${personality === key ? 'personality-card--active' : ''}`}
+                                        onClick={() => {
+                                            setPersonality(key)
+                                            setShowSettings(false)
+                                        }}
+                                    >
+                                        <div className="personality-card__name">
+                                            {key.charAt(0).toUpperCase() + key.slice(1)}
+                                        </div>
+                                        <div className="personality-card__desc">
+                                            {personalities[key].split('.')[0]}.
+                                        </div>
+                                    </button>
+                                ))}
+                            </div>
+                            
+                            <div className="custom-section">
+                                <div className="custom-section__header">
+                                    <h3>Custom Instructions</h3>
+                                    <button 
+                                        className={`custom-toggle ${personality === 'custom' ? 'custom-toggle--active' : ''}`}
+                                        onClick={() => setPersonality('custom')}
+                                    >
+                                        {personality === 'custom' ? '✓ Active' : 'Use Custom'}
+                                    </button>
+                                </div>
+                                <p className="custom-section__desc">
+                                    Define your own instructions for how the AI should behave:
+                                </p>
+                                <textarea
+                                    className="custom-textarea"
+                                    value={customPrompt}
+                                    onChange={(e) => setCustomPrompt(e.target.value)}
+                                    placeholder="Enter your custom instructions here..."
+                                    rows={4}
+                                />
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Main area */}
             <main className={`main ${isHome ? 'main--home' : 'main--chat'}`}>
