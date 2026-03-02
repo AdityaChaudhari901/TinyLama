@@ -10,6 +10,9 @@ __pycache__/
 .venv/
 venv/
 
+# Backend dist (built by Dockerfile during deployment)
+Backend/dist/
+
 # Ollama models (large binary files)
 *.gguf
 *.bin
