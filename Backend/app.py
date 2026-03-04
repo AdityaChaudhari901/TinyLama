@@ -3,12 +3,13 @@ import httpx
 import re
 import logging
 import asyncio
-from datetime import datetime
+from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
-from pydantic import BaseModel, field_validator, ValidationError
+from pydantic import BaseModel, field_validator
 import uvicorn
 
 # Configure logging
@@ -50,9 +51,11 @@ VIOLENCE_PATTERNS = [
     r"\b(bomb|explosive|detonate|c4|dynamite|grenade|ied|pipe\s+bomb)\b",
     r"\b(weapon|gun|firearm|ammunition|rifle|pistol|shotgun)\b",
     r"\b(kill|murder|assassinate|execute)\s+(someone|people|person|him|her)",
-    r"how\s+to\s+(kill|murder|assassinate|harm)",
+    r"\b(hurt|harm|injure|attack|beat)\s+(someone|people|person|him|her|my\s+friend|them)",
+    r"how\s+to\s+(kill|murder|assassinate|harm|hurt|injure)",
     r"\b(terrorism|terrorist\s+attack|mass\s+shooting)\b",
     r"\b(torture|mutilate|dismember)\b",
+    r"I\s+want\s+to\s+(hurt|harm|kill|murder|beat|attack)\b",
 ]
 
 # Illegal Drugs patterns (CRITICAL - was missing comprehensive coverage)
@@ -87,15 +90,6 @@ CHILD_SAFETY_PATTERNS = [
     r"\b(child|minor|underage|kid).{0,50}(sexual|explicit|porn|nude|naked)\b",
     r"\b(pedophile|pedophilia|child\s+abuse)\b",
 ]
-
-# Combine all harmful patterns for comprehensive checking
-HARMFUL_PATTERNS = (
-    VIOLENCE_PATTERNS +
-    DRUG_PATTERNS +
-    SELF_HARM_PATTERNS +
-    ILLEGAL_ACTIVITY_PATTERNS +
-    CHILD_SAFETY_PATTERNS
-)
 
 # Category mapping for better error messages
 PATTERN_CATEGORIES = {
@@ -156,10 +150,10 @@ REFUSAL_TEMPLATES = {
     ),
 }
 
-# AI Personality - Simplified for TinyLlama
+# AI Personality - Ultra-simplified for TinyLlama
 SYSTEM_PERSONALITY = os.getenv(
     "AI_PERSONALITY",
-    "You are a helpful AI. Give brief, clear answers."
+    "Answer directly and briefly."
 )
 
 app = FastAPI()
@@ -313,7 +307,8 @@ async def generate(payload: GenerateIn):
         "stream": False,
         "options": {
             "temperature": payload.temperature,
-            "num_predict": 150,  # Concise responses
+            "num_predict": 150,
+            "stop": ["\n\n", "Question:", "User:", "Asker:"],
         },
     }
     
@@ -328,14 +323,36 @@ async def generate(payload: GenerateIn):
                 r.raise_for_status()
                 result = r.json()
                 
-                # CRITICAL: Validate output before returning
-                response_text = result.get("response", "")
+                # Clean up the response
+                response_text = result.get("response", "").strip()
+                
+                # Remove fake dialogue continuations
+                stop_markers = ["\nUser:", "\nQuestion:", "\n\nUser:", "\n\nQuestion:", "\nAI:", "\nAsker:"]
+                for marker in stop_markers:
+                    if marker in response_text:
+                        response_text = response_text.split(marker)[0].strip()
+                
+                # Remove leading prefixes
+                while True:
+                    cleaned = response_text
+                    for prefix in ["AI:", "Asker:", "Assistant:", "Answer:", "Response:"]:
+                        if response_text.lower().startswith(prefix.lower()):
+                            response_text = response_text[len(prefix):].strip()
+                            break
+                    if cleaned == response_text:
+                        break
+                
+                # Validate output before returning
                 is_safe, validated_text, violation_category = validate_output(response_text)
                 
                 if not is_safe:
                     logger.error(f"Blocked unsafe output - Category: {violation_category}")
-                    result["response"] = validated_text
+                    response_text = validated_text
                 
+                if not response_text:
+                    response_text = "I apologize, but I couldn't generate a proper response."
+                
+                result["response"] = response_text
                 return result
         except httpx.HTTPStatusError as e:
             logger.error(f"Ollama HTTP error (attempt {attempt + 1}/{max_retries}): {e.response.status_code} - {e.response.text[:200]}")
@@ -351,6 +368,12 @@ async def generate(payload: GenerateIn):
                 await asyncio.sleep(retry_delay)
                 continue
             raise HTTPException(status_code=503, detail="Cannot connect to model service. Please try again later.")
+        except Exception as e:
+            logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                continue
+            raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again.")
 
 @app.post("/ask")
 async def ask(payload: AskIn):
@@ -423,13 +446,15 @@ async def ask(payload: AskIn):
                 await asyncio.sleep(retry_delay)
                 continue
             raise HTTPException(status_code=503, detail="Cannot connect to model service. Please try again later.")
+        except Exception as e:
+            logger.error(f"Unexpected error (attempt {attempt + 1}/{max_retries}): {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                continue
+            raise HTTPException(status_code=500, detail="An unexpected error occurred. Please try again.")
 
 # Serve React frontend static files from dist/
 # IMPORTANT: Mount static files at the end so API routes take precedence
-from pathlib import Path
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
-
 _dist = Path(__file__).parent / "dist"
 if _dist.exists():
     # Mount static assets directory
