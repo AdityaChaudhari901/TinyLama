@@ -109,20 +109,64 @@ PATTERN_CATEGORIES = {
 
 # Safe refusal templates
 REFUSAL_TEMPLATES = {
-    'violence': "I cannot provide information about violence or weapons. If you're in crisis, please contact emergency services.",
-    'drugs': "I cannot provide information about illegal drugs. If you're struggling with substance use, please reach out to a healthcare professional or call SAMHSA's National Helpline: 1-800-662-4357.",
-    'self_harm': "I'm concerned about your safety. If you're having thoughts of self-harm or suicide, please contact the National Suicide Prevention Lifeline at 988 or text 'HELLO' to 741741.",
-    'illegal_activity': "I cannot provide guidance on illegal activities. Please seek legitimate and legal alternatives.",
-    'child_safety': "I cannot engage with content involving minors in unsafe contexts. This is a serious matter - please report concerns to NCMEC at CyberTipline.org.",
-    'default': "I cannot assist with that request as it violates safety guidelines. Is there something else I can help you with?",
+    "violence": (
+        "I can’t help with requests that involve harming others, weapons, "
+        "or violent wrongdoing. If you’re feeling angry or overwhelmed, "
+        "I can help you think through safer ways to handle the situation."
+    ),
+
+    "drugs": (
+        "I can’t assist with obtaining, making, or using illegal drugs. "
+        "If you're looking for information about health effects, treatment, "
+        "or recovery options, I’d be glad to help."
+    ),
+
+    "self_harm": (
+        "I’m really sorry that you’re feeling this way. I can’t help with "
+        "anything involving self-harm. You don’t have to handle this alone — "
+        "if you’re in the U.S., you can call or text 988 for immediate support. "
+        "If you’re elsewhere, I can help find a local resource."
+    ),
+
+    "illegal_activity": (
+        "I can’t help with planning or carrying out illegal activities. "
+        "If you’d like, I can help you explore legal and constructive alternatives."
+    ),
+
+    "child_safety": (
+        "I can’t engage with content that involves minors in unsafe or exploitative contexts. "
+        "If you’re concerned about a child’s safety, please contact local authorities "
+        "or an appropriate child protection organization in your area."
+    ),
+
+    "privacy": (
+        "I can’t help with accessing someone’s private information, accounts, "
+        "or data without their consent. If you’re trying to recover your own "
+        "account, I can guide you through legitimate recovery options."
+    ),
+
+    "hate_or_harassment": (
+        "I can’t assist with content that targets or harms individuals or groups. "
+        "If you’d like help expressing your concerns in a respectful and constructive way, "
+        "I’m here to help."
+    ),
+
+    "default": (
+        "I can’t help with that request. If you’d like, tell me more about "
+        "what you’re trying to accomplish and I’ll do my best to help in a safe way."
+    ),
 }
 
 # AI Personality
 SYSTEM_PERSONALITY = os.getenv(
     "AI_PERSONALITY",
-    "You are a helpful, friendly, and professional AI assistant. "
-    "You provide clear and concise answers. You are respectful and positive. "
-    "If you don't know something, you admit it honestly."
+    "You are a professional, helpful, and reliable AI assistant. "
+    "Provide clear, accurate, and well-structured responses. "
+    "Be concise by default, but expand when the situation requires depth. "
+    "Maintain a respectful, calm, and solution-oriented tone. "
+    "If information is uncertain or unavailable, state that clearly. "
+    "Do not fabricate facts. "
+    "Prioritize user safety and ethical guidance at all times."
 )
 
 app = FastAPI()

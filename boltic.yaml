@@ -2,7 +2,7 @@ version: "1"
 
 service:
   name: ollama-ai-assistant
-  description: "Ollama llama3.2:1b AI Assistant — React frontend + FastAPI backend"
+  description: "Ollama TinyLlama AI Assistant — React frontend + FastAPI backend"
 
 build:
   context: .
@@ -14,7 +14,7 @@ deploy:
   maxInstances: 2
   resources:
     cpu: "2"
-    memory: "6Gi"
+    memory: "4Gi"
 
 environment:
   - name: PORT
@@ -30,10 +30,10 @@ environment:
   - name: OLLAMA_KEEP_ALIVE
     value: "0"
   - name: GOMEMLIMIT
-    value: "4500MiB"
+    value: "2500MiB"
   # Override Ollama's internal free memory check (which fails on Serverless)
   - name: OLLAMA_MAX_VRAM
-    value: "4294967296" # 4GB in bytes
+    value: "2147483648" # 2GB in bytes
   # Force pure CPU computation (avoids crashing on missing AVX instructions in serverless VM)
   - name: OLLAMA_LLM_LIBRARY
     value: "cpu"
