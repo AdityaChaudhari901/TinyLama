@@ -40,16 +40,16 @@ COPY Backend/app.py .
 COPY --from=frontend-builder /app/frontend/dist ./dist
 
 # Runtime environment
-ENV PORT=8080 \
+ENV PORT=7860 \
     MODEL=phi3:mini \
     OLLAMA_HOST=127.0.0.1:11434 \
     PYTHONUNBUFFERED=1
 
 
-EXPOSE 8080
+EXPOSE 7860
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=5 \
-    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
+    CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:7860/health')"
 
 # Model will be pulled at runtime by start.sh to avoid OOM killer during Kaniko build
 

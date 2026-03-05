@@ -31,8 +31,8 @@ else
   ollama pull $MODEL
 fi
 
-echo "Starting FastAPI app on port 8080..."
+echo "Starting FastAPI app on port $PORT..."
 echo "Environment: PORT=$PORT, MODEL=$MODEL"
 echo "Checking if dist folder exists: $(ls -la /app/dist 2>&1 || echo 'dist not found')"
 echo "About to start uvicorn..."
-exec python3 -m uvicorn app:app --host 0.0.0.0 --port 8080 --log-level info
+exec python3 -m uvicorn app:app --host 0.0.0.0 --port $PORT --log-level info
