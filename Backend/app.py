@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 PORT = int(os.getenv("PORT", "8080"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL = os.getenv("MODEL", "phi3:mini")
+MODEL = os.getenv("MODEL", "llama3.2:3b")
 # Comma-separated list of allowed CORS origins (set in .env for production)
 ALLOWED_ORIGINS = [
     o.strip()
