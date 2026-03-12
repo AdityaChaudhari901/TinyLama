@@ -48,7 +48,7 @@ ENV PORT=8080 \
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=15s --start-period=90s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=15s --start-period=180s --retries=5 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
 # Pre-pull ONLY qwen2.5:1.5b — wipe any other models first so nothing else is stored
