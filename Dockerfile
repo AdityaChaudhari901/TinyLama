@@ -53,12 +53,14 @@ HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=5 \
 
 # Pre-pull the model at build time so container starts immediately
 # (qwen2.5:1.5b is ~1GB — pulling at runtime causes health deadline failures)
-RUN ollama serve & \
+# OLLAMA_NO_KEYGEN prevents SSH identity keys being baked into the image
+RUN OLLAMA_NO_KEYGEN=true ollama serve & \
     pid=$! && \
     sleep 8 && \
     ollama pull qwen2.5:1.5b && \
     kill $pid && \
-    wait $pid 2>/dev/null || true
+    wait $pid 2>/dev/null || true && \
+    rm -f /root/.ollama/id_ed25519 /root/.ollama/id_ed25519.pub
 
 # Startup script
 COPY start.sh .
