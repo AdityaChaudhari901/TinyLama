@@ -51,12 +51,12 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=15s --start-period=120s --retries=5 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
-# Pre-pull the model at build time so container starts immediately
-# (qwen2.5:1.5b is ~1GB — pulling at runtime causes health deadline failures)
+# Pre-pull ONLY qwen2.5:1.5b — wipe any other models first so nothing else is stored
 # OLLAMA_NO_KEYGEN prevents SSH identity keys being baked into the image
 RUN OLLAMA_NO_KEYGEN=true ollama serve & \
     pid=$! && \
     sleep 8 && \
+    rm -rf /root/.ollama/models && \
     ollama pull qwen2.5:1.5b && \
     kill $pid && \
     wait $pid 2>/dev/null || true && \

@@ -450,6 +450,7 @@ async def generate(payload: GenerateIn):
         "options": {
             "temperature": payload.temperature,
             "num_predict": 500,
+            "num_ctx": 2048,
             "stop": ["Question:", "User:", "Asker:"],
         },
     }
@@ -523,7 +524,8 @@ async def ask(payload: AskIn):
         "stream": False,
         "options": {
             "temperature": payload.temperature,
-            "num_predict": 3000,
+            "num_predict": 800,
+            "num_ctx": 2048,
             "stop": ["Question:", "User:", "Asker:"],
         },
     }
