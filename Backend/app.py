@@ -12,6 +12,9 @@ from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, field_validator
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import uvicorn
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -22,20 +25,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-PORT              = int(os.getenv("PORT", "8080"))
-OLLAMA_URL        = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL             = os.getenv("MODEL", "gemma3:27b")
+PORT               = int(os.getenv("PORT", "8080"))
+OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
+MODEL              = os.getenv("MODEL", "gemma3:27b")
 OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "4"))
-NUM_THREADS       = int(os.getenv("OLLAMA_NUM_THREADS", "14"))
+NUM_THREADS        = int(os.getenv("OLLAMA_NUM_THREADS", "14"))
+RATE_LIMIT         = os.getenv("RATE_LIMIT", "20/minute")
 
-# Comma-separated list of allowed CORS origins (set in .env for production)
 ALLOWED_ORIGINS = [
     o.strip()
     for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:4173").split(",")
     if o.strip()
 ]
 
-MAX_INPUT_LENGTH = 2000
+MAX_INPUT_LENGTH  = 2000
+# Budget ~20 000 chars for history so system prompt + response fit in num_ctx=8192
+MAX_HISTORY_CHARS = 20_000
 
 # ── Prompt injection patterns ─────────────────────────────────────────────────
 INJECTION_PATTERNS = [
@@ -291,7 +296,7 @@ def validate_input(text: str) -> str:
     return text.strip()
 
 # ── LLM output cleaner ────────────────────────────────────────────────────────
-_STOP_MARKERS   = ["\nUser:", "\nQuestion:", "\n\nUser:", "\n\nQuestion:", "\nAI:", "\nAsker:"]
+_STOP_MARKERS     = ["\nUser:", "\nQuestion:", "\n\nUser:", "\n\nQuestion:", "\nAI:", "\nAsker:"]
 _LEADING_PREFIXES = ["AI:", "Asker:", "Assistant:", "Answer:", "Response:"]
 
 def clean_llm_text(text: str) -> str:
@@ -333,26 +338,48 @@ def validate_output(text: str) -> tuple[bool, str, str | None]:
             return False, REFUSAL_TEMPLATES['default'], 'harmful_phrase'
     return True, text, None
 
+# ── Context window management ─────────────────────────────────────────────────
+def trim_to_context(messages: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
+    """
+    Trim conversation history so total character count stays within budget.
+    Always keeps the most recent messages; older ones are dropped first.
+    The last user message is always preserved regardless of length.
+    """
+    total = 0
+    result = []
+    for msg in reversed(messages):
+        total += len(msg.get("content", ""))
+        if total > max_chars and result:
+            break
+        result.insert(0, msg)
+    # Safety: always include at least the last message
+    if not result and messages:
+        result = [messages[-1]]
+    return result
+
 # ── Shared generation options tuned for gemma3:27b on 16-core CPU ─────────────
 def _base_options(temperature: float) -> dict:
     return {
         "temperature": temperature,
-        "top_p": 0.95,        # gemma3 recommended
-        "top_k": 64,          # gemma3 recommended
-        "num_predict": 1500,  # generous output budget for a 27B model
-        "num_ctx": 8192,      # safe with ~13GB KV budget (32GB - 17GB model - 2GB OS)
-        "num_thread": NUM_THREADS,  # CPU threads dedicated to inference
+        "top_p": 0.95,
+        "top_k": 64,
+        "num_predict": 1500,
+        "num_ctx": 8192,
+        "num_thread": NUM_THREADS,
         "stop": ["Question:", "User:", "Asker:"],
     }
 
-# ── AI Personality ─────────────────────────────────────────────────────────────
+# ── AI Personality ────────────────────────────────────────────────────────────
 SYSTEM_PERSONALITY = os.getenv(
     "AI_PERSONALITY",
     "Answer directly with specific facts, names, and examples. Do not repeat the question."
 )
 
-# ── App ────────────────────────────────────────────────────────────────────────
+# ── App + Rate limiter ────────────────────────────────────────────────────────
+limiter = Limiter(key_func=get_remote_address, default_limits=[RATE_LIMIT])
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -362,18 +389,26 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-# ── Shared resources (created at startup) ────────────────────────────────────
+# ── Shared resources ──────────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
 _ollama_semaphore: asyncio.Semaphore | None = None
+
+# Tracks requests currently waiting for or holding a semaphore slot
+_active_requests: int = 0
+
+# Lightweight metrics
+_metrics: dict = {
+    "requests_total": 0,
+    "requests_blocked_safety": 0,
+    "requests_rate_limited": 0,
+    "avg_ttft_ms": 0.0,
+    "ttft_samples": 0,
+    "total_tokens_streamed": 0,
+}
 
 
 @app.on_event("startup")
 async def startup_event():
-    """
-    - Create a shared persistent HTTP client (connection pooling to Ollama).
-    - Create a semaphore that limits concurrent Ollama requests to OLLAMA_NUM_PARALLEL.
-    - Fire-and-forget warmup task to load the model into RAM before the first user request.
-    """
     global _http_client, _ollama_semaphore
     _http_client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=5.0),
@@ -384,7 +419,7 @@ async def startup_event():
         ),
     )
     _ollama_semaphore = asyncio.Semaphore(OLLAMA_NUM_PARALLEL)
-    logger.info(f"HTTP client ready | semaphore={OLLAMA_NUM_PARALLEL} | threads={NUM_THREADS}")
+    logger.info(f"HTTP client ready | parallel={OLLAMA_NUM_PARALLEL} | threads={NUM_THREADS}")
     asyncio.create_task(_warmup_model())
 
 
@@ -395,19 +430,15 @@ async def shutdown_event():
 
 
 async def _warmup_model():
-    """
-    Send a minimal generation request so Ollama loads the model into RAM.
-    Retries every 10 s for up to ~3 min. Without this, the first real user
-    request pays the full cold-start cost of loading 17 GB from disk.
-    """
-    await asyncio.sleep(5)  # Give Ollama server a moment to initialize
+    """Load model into RAM before the first user request."""
+    await asyncio.sleep(5)
     for attempt in range(20):
         try:
             r = await _http_client.post(
-                f"{OLLAMA_URL}/api/generate",
+                f"{OLLAMA_URL}/api/chat",
                 json={
                     "model": MODEL,
-                    "prompt": "hi",
+                    "messages": [{"role": "user", "content": "hi"}],
                     "stream": False,
                     "options": {"num_predict": 1, "num_ctx": 512, "num_thread": NUM_THREADS},
                 },
@@ -434,6 +465,28 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # ── Request models ────────────────────────────────────────────────────────────
+class ChatMessage(BaseModel):
+    role: str     # "user" | "assistant"
+    content: str
+
+
+class AskIn(BaseModel):
+    messages: list[ChatMessage]
+    temperature: float | None = 0.7
+    personality: str | None = None
+
+    @field_validator('messages')
+    @classmethod
+    def validate_messages(cls, v: list[ChatMessage]) -> list[ChatMessage]:
+        if not v:
+            raise ValueError("Messages cannot be empty")
+        # Validate only the latest user message (previous ones were validated at send time)
+        last_user = next((m for m in reversed(v) if m.role == 'user'), None)
+        if last_user:
+            validate_input(last_user.content)
+        return v
+
+
 class GenerateIn(BaseModel):
     prompt: str
     temperature: float | None = 0.7
@@ -441,17 +494,6 @@ class GenerateIn(BaseModel):
     @field_validator('prompt')
     @classmethod
     def validate_prompt(cls, v: str) -> str:
-        return validate_input(v)
-
-
-class AskIn(BaseModel):
-    question: str
-    temperature: float | None = 0.7
-    personality: str | None = None
-
-    @field_validator('question')
-    @classmethod
-    def validate_question(cls, v: str) -> str:
         return validate_input(v)
 
 
@@ -477,7 +519,14 @@ def _is_model_ready() -> bool:
     return result
 
 
-# ── Health / Readiness ────────────────────────────────────────────────────────
+def _update_ttft(ttft_ms: float):
+    """Rolling average of time-to-first-token."""
+    n = _metrics["ttft_samples"] + 1
+    _metrics["avg_ttft_ms"] = (_metrics["avg_ttft_ms"] * _metrics["ttft_samples"] + ttft_ms) / n
+    _metrics["ttft_samples"] = n
+
+
+# ── Health / Readiness / Queue / Metrics ─────────────────────────────────────
 @app.get("/health")
 def health():
     return {"ok": True, "model": MODEL, "model_ready": _is_model_ready()}
@@ -488,17 +537,34 @@ def ready():
     return {"ready": _is_model_ready(), "model": MODEL}
 
 
-# ── /generate (raw, non-streaming) ───────────────────────────────────────────
+@app.get("/queue")
+def queue_status():
+    """How many requests are currently waiting for an Ollama slot."""
+    return {
+        "active": _active_requests,
+        "capacity": OLLAMA_NUM_PARALLEL,
+        "waiting": max(0, _active_requests - OLLAMA_NUM_PARALLEL),
+    }
+
+
+@app.get("/metrics")
+def metrics():
+    return {**_metrics, "model": MODEL, "model_ready": _is_model_ready()}
+
+
+# ── /generate (raw prompt, non-streaming) ────────────────────────────────────
 @app.post("/generate")
-async def generate(payload: GenerateIn):
+@limiter.limit(RATE_LIMIT)
+async def generate(request: Request, payload: GenerateIn):
     logger.info(f"Generate: {payload.prompt[:50]}...")
+    _metrics["requests_total"] += 1
 
     if not _is_model_ready():
         raise HTTPException(503, detail=f"Model '{MODEL}' is still loading.")
 
     body = {
         "model": MODEL,
-        "prompt": payload.prompt,
+        "messages": [{"role": "user", "content": payload.prompt}],
         "stream": False,
         "options": _base_options(payload.temperature),
     }
@@ -507,69 +573,17 @@ async def generate(payload: GenerateIn):
     for attempt in range(max_retries):
         try:
             async with _ollama_semaphore:
-                r = await _http_client.post(f"{OLLAMA_URL}/api/generate", json=body)
-                r.raise_for_status()
-                result = r.json()
-                response_text = clean_llm_text(result.get("response", "").strip())
-                is_safe, validated_text, violation_category = validate_output(response_text)
-                if not is_safe:
-                    logger.error(f"Blocked unsafe output [{violation_category}]")
-                    response_text = validated_text
-                result["response"] = response_text or "I apologize, but I couldn't generate a proper response."
-                return result
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Ollama HTTP error (attempt {attempt+1}): {e.response.status_code}")
-            if attempt < max_retries - 1 and e.response.status_code == 500:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(503, detail="Model service temporarily unavailable.")
-        except httpx.RequestError as e:
-            logger.error(f"Ollama connection error (attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(503, detail="Cannot connect to model service.")
-        except Exception as e:
-            logger.error(f"Unexpected error (attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(500, detail="An unexpected error occurred.")
-
-
-# ── /ask (non-streaming, kept for backward compat) ───────────────────────────
-@app.post("/ask")
-async def ask(payload: AskIn):
-    logger.info(f"Ask: {payload.question[:50]}...")
-
-    if not _is_model_ready():
-        raise HTTPException(503, detail=f"Model '{MODEL}' is still loading.")
-
-    personality = payload.personality or SYSTEM_PERSONALITY
-    if len(personality) > 500:
-        personality = personality[:500].rsplit('.', 1)[0] + '.'
-
-    body = {
-        "model": MODEL,
-        "system": personality,
-        "prompt": payload.question,
-        "stream": False,
-        "options": _base_options(payload.temperature),
-    }
-
-    max_retries, retry_delay = 3, 2
-    for attempt in range(max_retries):
-        try:
-            async with _ollama_semaphore:
-                r = await _http_client.post(f"{OLLAMA_URL}/api/generate", json=body)
+                r = await _http_client.post(f"{OLLAMA_URL}/api/chat", json=body)
                 r.raise_for_status()
                 data = r.json()
-                answer = clean_llm_text(data.get("response", "").strip())
-                is_safe, validated_answer, violation_category = validate_output(answer)
+                response_text = clean_llm_text(
+                    data.get("message", {}).get("content", "").strip()
+                )
+                is_safe, validated_text, _ = validate_output(response_text)
                 if not is_safe:
-                    logger.error(f"Blocked unsafe output [{violation_category}]")
-                    answer = validated_answer
-                return {"answer": answer or "I apologize, but I couldn't generate a proper response.", "model": MODEL}
+                    _metrics["requests_blocked_safety"] += 1
+                    response_text = validated_text
+                return {"response": response_text or "I couldn't generate a proper response.", "model": MODEL}
         except httpx.HTTPStatusError as e:
             logger.error(f"Ollama HTTP error (attempt {attempt+1}): {e.response.status_code}")
             if attempt < max_retries - 1 and e.response.status_code == 500:
@@ -590,18 +604,22 @@ async def ask(payload: AskIn):
             raise HTTPException(500, detail="An unexpected error occurred.")
 
 
-# ── /ask/stream (SSE streaming — primary endpoint used by frontend) ───────────
+# ── /ask/stream — primary endpoint (SSE, multi-turn) ─────────────────────────
 @app.post("/ask/stream")
-async def ask_stream(payload: AskIn):
+@limiter.limit(RATE_LIMIT)
+async def ask_stream(request: Request, payload: AskIn):
     """
-    Streams tokens back to the client as Server-Sent Events.
-    Event types:
-      {"type": "token",   "content": "..."}   — one or more tokens
-      {"type": "done"}                         — generation complete, content is safe
-      {"type": "blocked", "refusal": "..."}    — output violated safety rules; replace UI content
-      {"type": "error",   "message": "..."}    — upstream failure
+    Multi-turn streaming chat via Ollama /api/chat.
+    Sends the full conversation history so the model has context.
+    Returns Server-Sent Events:
+      {"type": "token",   "content": "..."}
+      {"type": "done",    "ttft_ms": 123}
+      {"type": "blocked", "refusal": "..."}
+      {"type": "error",   "message": "..."}
     """
-    logger.info(f"Stream: {payload.question[:50]}...")
+    global _active_requests
+    logger.info(f"Stream: {len(payload.messages)} messages in history")
+    _metrics["requests_total"] += 1
 
     if not _is_model_ready():
         raise HTTPException(503, detail=f"Model '{MODEL}' is still loading.")
@@ -610,19 +628,27 @@ async def ask_stream(payload: AskIn):
     if len(personality) > 500:
         personality = personality[:500].rsplit('.', 1)[0] + '.'
 
+    # Build messages for /api/chat: system prompt + trimmed history
+    history = trim_to_context([{"role": m.role, "content": m.content} for m in payload.messages])
+    chat_messages = [{"role": "system", "content": personality}] + history
+
     body = {
         "model": MODEL,
-        "system": personality,
-        "prompt": payload.question,
+        "messages": chat_messages,
         "stream": True,
         "options": _base_options(payload.temperature),
     }
 
     async def event_stream():
-        full_text = ""
+        global _active_requests
+        full_text  = ""
+        request_start = time.monotonic()
+        first_token_received = False
+
+        _active_requests += 1
         try:
             async with _ollama_semaphore:
-                async with _http_client.stream("POST", f"{OLLAMA_URL}/api/generate", json=body) as r:
+                async with _http_client.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as r:
                     r.raise_for_status()
                     async for line in r.aiter_lines():
                         if not line.strip():
@@ -632,21 +658,29 @@ async def ask_stream(payload: AskIn):
                         except json.JSONDecodeError:
                             continue
 
-                        token = chunk.get("response", "")
+                        token = chunk.get("message", {}).get("content", "")
                         done  = chunk.get("done", False)
 
                         if token:
+                            if not first_token_received:
+                                first_token_received = True
+                                ttft_ms = (time.monotonic() - request_start) * 1000
+                                _update_ttft(ttft_ms)
+
                             full_text += token
+                            _metrics["total_tokens_streamed"] += 1
                             yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
                         if done:
                             is_safe, _, category = validate_output(full_text)
                             if not is_safe:
+                                _metrics["requests_blocked_safety"] += 1
                                 refusal = REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default'])
                                 logger.error(f"Stream output blocked [{category}]")
                                 yield f"data: {json.dumps({'type': 'blocked', 'refusal': refusal})}\n\n"
                             else:
-                                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                                ttft_ms = round((time.monotonic() - request_start) * 1000)
+                                yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms})}\n\n"
                             return
 
         except httpx.HTTPStatusError as e:
@@ -658,13 +692,15 @@ async def ask_stream(payload: AskIn):
         except Exception as e:
             logger.error(f"Stream unexpected error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': 'An unexpected error occurred.'})}\n\n"
+        finally:
+            _active_requests -= 1
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # Prevent nginx from buffering the SSE stream
+            "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
     )

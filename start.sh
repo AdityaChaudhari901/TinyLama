@@ -1,53 +1,59 @@
 #!/bin/bash
-# Do NOT use set -e — we must always reach the uvicorn exec at the end,
-# even if Ollama is slow or model verification fails.
+# Do NOT use set -e — we must always reach the uvicorn exec at the end.
 
 echo "=========================================="
 echo "Starting deployment at $(date)"
-echo "Working directory: $(pwd)"
-echo "Python version: $(python3 --version)"
-echo "Files in /app: $(ls -la /app)"
+echo "MODEL=$MODEL  PORT=$PORT"
+echo "OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL  OLLAMA_NUM_THREADS=$OLLAMA_NUM_THREADS"
 echo "=========================================="
 
+# ── 1. Start Ollama server ────────────────────────────────────────────────────
 echo "Starting Ollama server..."
 OLLAMA_HOST=127.0.0.1:11434 ollama serve &
+OLLAMA_PID=$!
 
-# Wait up to 150 s for Ollama to be ready.
-echo "Waiting for Ollama server to start (up to 150 s)..."
+# ── 2. Wait for Ollama API to respond (up to 150 s) ──────────────────────────
+echo "Waiting for Ollama to be ready (up to 150 s)..."
 OLLAMA_READY=false
 for i in $(seq 1 50); do
-  if curl -s http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-    echo "Ollama server is ready after ${i} attempts (~$((i*3)) s)!"
-    OLLAMA_READY=true
-    break
-  fi
-  echo "Waiting for Ollama... ($i/50)"
-  sleep 3
+    if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
+        echo "Ollama ready after ~$((i*3)) s"
+        OLLAMA_READY=true
+        break
+    fi
+    sleep 3
 done
 
 if [ "$OLLAMA_READY" = "false" ]; then
-  echo "Ollama did not respond in 150 s — continuing anyway so FastAPI can start."
+    echo "WARNING: Ollama did not respond in 150 s — continuing anyway."
 fi
 
-# Remove any models that are NOT gemma3:27b (free up disk, best-effort)
-echo "Removing any non-gemma3 models..."
+# ── 3. Clean up any stale models to free disk space ──────────────────────────
+echo "Removing any model that is not $MODEL..."
 for model in $(ollama list 2>/dev/null | awk 'NR>1 {print $1}'); do
-  if [[ "$model" != *"gemma3:27b"* ]]; then
-    echo "Removing $model..."
-    ollama rm "$model" 2>/dev/null || true
-  fi
+    if [[ "$model" != *"$MODEL"* ]]; then
+        echo "  Removing $model..."
+        ollama rm "$model" 2>/dev/null || true
+    fi
 done
 
-# Verify gemma3:27b is present; pull only as a last resort.
-echo "Verifying model $MODEL..."
+# ── 4. Pull model if not already present ─────────────────────────────────────
+# On the very first deployment the model is not cached yet.
+# Subsequent deployments reuse the persistent volume — no re-download needed.
 if ollama list 2>/dev/null | grep -q "$MODEL"; then
-  echo "Model $MODEL is ready!"
+    echo "Model $MODEL is already present."
 else
-  echo "Model not found — attempting pull (this will be slow)..."
-  ollama pull "$MODEL" 2>/dev/null || echo "Pull failed — FastAPI will surface a 503 until the model is available."
+    echo "Model $MODEL not found — pulling now (this may take several minutes)..."
+    # Pull with retries; failure is non-fatal so FastAPI still starts and
+    # returns 503 until the model becomes available.
+    for attempt in 1 2 3; do
+        ollama pull "$MODEL" && echo "Pull succeeded." && break
+        echo "Pull attempt $attempt failed — retrying in 10 s..."
+        sleep 10
+    done
 fi
 
-echo "Starting FastAPI app on port $PORT..."
-echo "Environment: PORT=$PORT, MODEL=$MODEL, OLLAMA_NUM_PARALLEL=$OLLAMA_NUM_PARALLEL, OLLAMA_NUM_THREADS=$OLLAMA_NUM_THREADS"
-echo "Checking if dist folder exists: $(ls -la /app/dist 2>&1 || echo 'dist not found')"
+# ── 5. Launch FastAPI ─────────────────────────────────────────────────────────
+echo "Starting FastAPI on port $PORT..."
+echo "Dist folder: $(ls /app/dist 2>/dev/null | head -5 || echo 'not found')"
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info

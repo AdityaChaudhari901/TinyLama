@@ -13,14 +13,11 @@ RUN npm run build
 
 # ============================================================
 # Stage 2: Runtime
-# ollama/ollama:latest (Ubuntu 22.04) already has the ollama
-# binary — no curl/install.sh needed.
+# ollama/ollama:latest (Ubuntu 22.04) already has the ollama binary.
 # ============================================================
 FROM ollama/ollama:latest
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install python3, pip; use --break-system-packages to bypass
-# PEP 668 (Ubuntu marks its Python as "externally managed")
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         python3-pip \
@@ -28,8 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Copy & install Python deps directly — packages land in
-# Ubuntu's dist-packages (not site-packages) so imports work
+# Python dependencies
 COPY Backend/requirements.txt .
 RUN pip3 install --no-cache-dir --break-system-packages -r requirements.txt
 
@@ -39,36 +35,26 @@ COPY Backend/app.py .
 # Built React frontend served by FastAPI as static files
 COPY --from=frontend-builder /app/frontend/dist ./dist
 
-# Runtime environment
+# Runtime environment defaults (all overridable via boltic.yaml env block)
 ENV PORT=8080 \
     MODEL=gemma3:27b \
     OLLAMA_HOST=127.0.0.1:11434 \
     PYTHONUNBUFFERED=1
 
-
 EXPOSE 8080
+
+# NOTE: We do NOT run `ollama pull` here.
+# Kaniko (the Boltic build runner) OOM-kills any layer that snapshots a 17 GB
+# model file. Instead, start.sh pulls the model at container start time and
+# keeps it in the persistent volume across restarts.
+# start.sh waits up to 150 s for Ollama + the pull before launching FastAPI.
 
 HEALTHCHECK --interval=30s --timeout=15s --start-period=300s --retries=5 \
     CMD python3 -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"
 
-# Pre-pull gemma3:27b at build time so the container starts with the model on disk.
-# OLLAMA_NO_KEYGEN prevents SSH identity keys from being baked into the image.
-RUN OLLAMA_NO_KEYGEN=true ollama serve & \
-    pid=$! && \
-    echo "Waiting for Ollama to be ready..." && \
-    for i in $(seq 1 60); do \
-        curl -s http://127.0.0.1:11434/api/tags > /dev/null 2>&1 && echo "Ollama ready after ${i}s" && break || sleep 1; \
-    done && \
-    ollama pull gemma3:27b && \
-    kill $pid && \
-    wait $pid 2>/dev/null || true && \
-    rm -f /root/.ollama/id_ed25519 /root/.ollama/id_ed25519.pub
-
-# Startup script
 COPY start.sh .
 RUN chmod +x start.sh
 
 # Override the default ollama ENTRYPOINT so our script runs directly
 ENTRYPOINT []
-
 CMD ["./start.sh"]
