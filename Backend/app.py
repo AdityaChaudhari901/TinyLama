@@ -644,51 +644,62 @@ async def ask_stream(request: Request, payload: AskIn):
         full_text  = ""
         request_start = time.monotonic()
         first_token_received = False
+        max_retries, retry_delay = 3, 5
 
         _active_requests += 1
         try:
-            async with _ollama_semaphore:
-                async with _http_client.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as r:
-                    r.raise_for_status()
-                    async for line in r.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
+            for attempt in range(max_retries):
+                try:
+                    async with _ollama_semaphore:
+                        async with _http_client.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as r:
+                            r.raise_for_status()
+                            async for line in r.aiter_lines():
+                                if not line.strip():
+                                    continue
+                                try:
+                                    chunk = json.loads(line)
+                                except json.JSONDecodeError:
+                                    continue
 
-                        token = chunk.get("message", {}).get("content", "")
-                        done  = chunk.get("done", False)
+                                token = chunk.get("message", {}).get("content", "")
+                                done  = chunk.get("done", False)
 
-                        if token:
-                            if not first_token_received:
-                                first_token_received = True
-                                ttft_ms = (time.monotonic() - request_start) * 1000
-                                _update_ttft(ttft_ms)
+                                if token:
+                                    if not first_token_received:
+                                        first_token_received = True
+                                        ttft_ms = (time.monotonic() - request_start) * 1000
+                                        _update_ttft(ttft_ms)
 
-                            full_text += token
-                            _metrics["total_tokens_streamed"] += 1
-                            yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+                                    full_text += token
+                                    _metrics["total_tokens_streamed"] += 1
+                                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
 
-                        if done:
-                            is_safe, _, category = validate_output(full_text)
-                            if not is_safe:
-                                _metrics["requests_blocked_safety"] += 1
-                                refusal = REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default'])
-                                logger.error(f"Stream output blocked [{category}]")
-                                yield f"data: {json.dumps({'type': 'blocked', 'refusal': refusal})}\n\n"
-                            else:
-                                ttft_ms = round((time.monotonic() - request_start) * 1000)
-                                yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms})}\n\n"
-                            return
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Stream HTTP error: {e.response.status_code}")
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Model service temporarily unavailable.'})}\n\n"
-        except httpx.RequestError as e:
-            logger.error(f"Stream connection error: {e}")
-            yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to model service.'})}\n\n"
+                                if done:
+                                    is_safe, _, category = validate_output(full_text)
+                                    if not is_safe:
+                                        _metrics["requests_blocked_safety"] += 1
+                                        refusal = REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default'])
+                                        logger.error(f"Stream output blocked [{category}]")
+                                        yield f"data: {json.dumps({'type': 'blocked', 'refusal': refusal})}\n\n"
+                                    else:
+                                        ttft_ms = round((time.monotonic() - request_start) * 1000)
+                                        yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms})}\n\n"
+                                    return
+                    return  # success, exit retry loop
+                except httpx.HTTPStatusError as e:
+                    logger.error(f"Stream HTTP error (attempt {attempt+1}): {e.response.status_code}")
+                    if attempt < max_retries - 1 and e.response.status_code in (500, 503):
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Model service temporarily unavailable.'})}\n\n"
+                    return
+                except httpx.RequestError as e:
+                    logger.error(f"Stream connection error (attempt {attempt+1}): {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to model service.'})}\n\n"
+                    return
         except Exception as e:
             logger.error(f"Stream unexpected error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': 'An unexpected error occurred.'})}\n\n"

@@ -42,6 +42,9 @@ echo "Pulling model $MODEL in background..."
             sleep 10
         done
     fi
+    echo "Warming up model $MODEL into RAM..."
+    ollama run "$MODEL" "hi" --nowordwrap 2>/dev/null || true
+    echo "Model $MODEL is warm and ready."
 ) &
 
 # ── 5. Wait for either process to exit (keeps script alive) ──────────────────
