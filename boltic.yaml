@@ -8,6 +8,10 @@ deploy:
     resources:
         cpu: "16"
         memory: 32Gi
+    volumes:
+        - name: ollama-models
+          mountPath: /root/.ollama
+          size: 25Gi
 environment:
     - name: PORT
       value: "8080"

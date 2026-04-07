@@ -10,38 +10,39 @@ echo "=========================================="
 # ── 1. Start Ollama server ────────────────────────────────────────────────────
 echo "Starting Ollama server..."
 OLLAMA_HOST=127.0.0.1:11434 ollama serve &
+OLLAMA_PID=$!
 
 # ── 2. Wait for Ollama API to respond (up to 150 s) ──────────────────────────
 echo "Waiting for Ollama to be ready (up to 150 s)..."
-OLLAMA_READY=false
 for i in $(seq 1 50); do
     if curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
         echo "Ollama ready after ~$((i*3)) s"
-        OLLAMA_READY=true
         break
     fi
     sleep 3
 done
 
-if [ "$OLLAMA_READY" = "false" ]; then
-    echo "WARNING: Ollama did not respond in 150 s — continuing anyway."
-fi
-
-# ── 3. Verify the model that was baked into the image is present ──────────────
-# The model is pulled at build time so this should always succeed.
-# The pull below is a last-resort fallback in case the image layer was dropped.
-echo "Verifying model $MODEL..."
-if ollama list 2>/dev/null | grep -q "$MODEL"; then
-    echo "Model $MODEL is ready."
-else
-    echo "WARNING: Model $MODEL not found in image — attempting pull..."
-    for attempt in 1 2 3; do
-        ollama pull "$MODEL" && echo "Pull succeeded." && break
-        echo "Attempt $attempt failed — retrying in 10 s..."
-        sleep 10
-    done
-fi
-
-# ── 4. Launch FastAPI ─────────────────────────────────────────────────────────
+# ── 3. Start FastAPI immediately so Nomad health checks pass ──────────────────
+# The /health endpoint returns ok:true regardless of model state, so Nomad
+# marks the allocation healthy within seconds. Model pull happens in background.
 echo "Starting FastAPI on port $PORT..."
-exec python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info
+python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info &
+UVICORN_PID=$!
+
+# ── 4. Pull model in the background ──────────────────────────────────────────
+echo "Pulling model $MODEL in background..."
+(
+    if ollama list 2>/dev/null | grep -q "$MODEL"; then
+        echo "Model $MODEL already present — skipping pull."
+    else
+        echo "Model $MODEL not found — pulling now..."
+        for attempt in 1 2 3; do
+            ollama pull "$MODEL" && echo "Model pull succeeded." && break
+            echo "Pull attempt $attempt failed — retrying in 10 s..."
+            sleep 10
+        done
+    fi
+) &
+
+# ── 5. Wait for either process to exit (keeps script alive) ──────────────────
+wait $UVICORN_PID
