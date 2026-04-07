@@ -33,9 +33,8 @@ environment:
       value: "1"
     - name: OLLAMA_FLASH_ATTENTION
       value: "1"
-    # Halves KV-cache memory — allows larger context or more parallel slots
     - name: OLLAMA_KV_CACHE_TYPE
-      value: "q8_0"
+      value: q8_0
 serverlessConfig:
     Env:
         APPLICATION_ENV_PREFIX: BOLT
@@ -62,10 +61,10 @@ serverlessConfig:
         Max: 10
         MaxIdleTime: 300
     Resources:
-        CPU: 16
+        CPU: 1
         MemoryMB: 32768
         MemoryMaxMB: 32768
-        DiskMB: 51200
+        DiskMB: 30720
     Timeout: 60
 service:
     description: Ollama Gemma3 27B AI Assistant — React frontend + FastAPI backend
