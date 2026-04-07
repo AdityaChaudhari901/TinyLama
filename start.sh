@@ -10,7 +10,6 @@ echo "=========================================="
 # ── 1. Start Ollama server ────────────────────────────────────────────────────
 echo "Starting Ollama server..."
 OLLAMA_HOST=127.0.0.1:11434 ollama serve &
-OLLAMA_PID=$!
 
 # ── 2. Wait for Ollama API to respond (up to 150 s) ──────────────────────────
 echo "Waiting for Ollama to be ready (up to 150 s)..."
@@ -28,32 +27,21 @@ if [ "$OLLAMA_READY" = "false" ]; then
     echo "WARNING: Ollama did not respond in 150 s — continuing anyway."
 fi
 
-# ── 3. Clean up any stale models to free disk space ──────────────────────────
-echo "Removing any model that is not $MODEL..."
-for model in $(ollama list 2>/dev/null | awk 'NR>1 {print $1}'); do
-    if [[ "$model" != *"$MODEL"* ]]; then
-        echo "  Removing $model..."
-        ollama rm "$model" 2>/dev/null || true
-    fi
-done
-
-# ── 4. Pull model if not already present ─────────────────────────────────────
-# On the very first deployment the model is not cached yet.
-# Subsequent deployments reuse the persistent volume — no re-download needed.
+# ── 3. Verify the model that was baked into the image is present ──────────────
+# The model is pulled at build time so this should always succeed.
+# The pull below is a last-resort fallback in case the image layer was dropped.
+echo "Verifying model $MODEL..."
 if ollama list 2>/dev/null | grep -q "$MODEL"; then
-    echo "Model $MODEL is already present."
+    echo "Model $MODEL is ready."
 else
-    echo "Model $MODEL not found — pulling now (this may take several minutes)..."
-    # Pull with retries; failure is non-fatal so FastAPI still starts and
-    # returns 503 until the model becomes available.
+    echo "WARNING: Model $MODEL not found in image — attempting pull..."
     for attempt in 1 2 3; do
         ollama pull "$MODEL" && echo "Pull succeeded." && break
-        echo "Pull attempt $attempt failed — retrying in 10 s..."
+        echo "Attempt $attempt failed — retrying in 10 s..."
         sleep 10
     done
 fi
 
-# ── 5. Launch FastAPI ─────────────────────────────────────────────────────────
+# ── 4. Launch FastAPI ─────────────────────────────────────────────────────────
 echo "Starting FastAPI on port $PORT..."
-echo "Dist folder: $(ls /app/dist 2>/dev/null | head -5 || echo 'not found')"
 exec python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info

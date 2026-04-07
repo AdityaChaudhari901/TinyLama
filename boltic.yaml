@@ -36,10 +36,6 @@ environment:
     # Halves KV-cache memory — allows larger context or more parallel slots
     - name: OLLAMA_KV_CACHE_TYPE
       value: "q8_0"
-    # mmap loads model weights from disk on demand — critical when container RAM
-    # is constrained. Avoids the "model requires more system memory" 500 error.
-    - name: OLLAMA_USE_MMAP
-      value: "1"
 serverlessConfig:
     Env:
         APPLICATION_ENV_PREFIX: BOLT
@@ -69,7 +65,7 @@ serverlessConfig:
         CPU: 16
         MemoryMB: 32768
         MemoryMaxMB: 32768
-        DiskMB: 30720
+        DiskMB: 51200
     Timeout: 60
 service:
     description: Ollama Gemma3 27B AI Assistant — React frontend + FastAPI backend
