@@ -36,23 +36,30 @@ for i in $(seq 1 50); do
     sleep 3
 done
 
-# ── 4. Verify the image already contains the configured model ─────────────────
-if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
-    echo "Bundled model $MODEL was not found in OLLAMA_MODELS=$OLLAMA_MODELS"
-    exit 1
-fi
-
-# ── 5. Start FastAPI after Ollama is healthy ──────────────────────────────────
+# ── 4. Start FastAPI immediately so health checks can pass while the model
+#      is restored or downloaded onto the persistent models volume. ───────────
 echo "Starting FastAPI on port $PORT..."
 python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info &
 UVICORN_PID=$!
 
-# ── 6. Warm up the bundled model in the background ────────────────────────────
-echo "Warming up bundled model $MODEL..."
+# ── 5. Restore the configured model onto the persistent volume if needed. ────
+echo "Ensuring model $MODEL is available in OLLAMA_MODELS=$OLLAMA_MODELS..."
 (
+    if ollama list 2>/dev/null | grep -q "$MODEL"; then
+        echo "Model $MODEL already present — skipping pull."
+    else
+        echo "Model $MODEL not found — pulling now..."
+        for attempt in 1 2 3; do
+            ollama pull "$MODEL" && echo "Model pull succeeded." && break
+            echo "Pull attempt $attempt failed — retrying in 10 s..."
+            sleep 10
+        done
+    fi
+
+    echo "Warming up model $MODEL into RAM..."
     ollama run "$MODEL" "hi" --nowordwrap 2>/dev/null || true
     echo "Model $MODEL is warm and ready."
 ) &
 
-# ── 7. Wait for either process to exit (keeps script alive) ──────────────────
+# ── 6. Wait for either process to exit (keeps script alive) ──────────────────
 wait $UVICORN_PID
