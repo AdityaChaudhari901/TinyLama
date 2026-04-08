@@ -29,14 +29,14 @@ logger = logging.getLogger(__name__)
 PORT               = int(os.getenv("PORT", "8080"))
 OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
 MODEL              = os.getenv("MODEL", "gemma3:4b")
-OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "2"))
-NUM_THREADS        = int(os.getenv("OLLAMA_NUM_THREADS", "6"))
+OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "1"))
+NUM_THREADS        = int(os.getenv("OLLAMA_NUM_THREADS", "4"))
 RATE_LIMIT         = os.getenv("RATE_LIMIT", "120/minute")
 QUEUE_TIMEOUT_SECONDS = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "20"))
 MAX_QUEUE_DEPTH    = int(os.getenv("MAX_QUEUE_DEPTH", "8"))
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.2"))
-DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "384"))
-DEFAULT_NUM_CTX    = int(os.getenv("DEFAULT_NUM_CTX", "8192"))
+DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "256"))
+DEFAULT_NUM_CTX    = int(os.getenv("DEFAULT_NUM_CTX", "2048"))
 MODEL_READY_TTL_SECONDS = float(os.getenv("MODEL_READY_TTL_SECONDS", "5"))
 
 ALLOWED_ORIGINS = [
@@ -46,8 +46,8 @@ ALLOWED_ORIGINS = [
 ]
 
 MAX_INPUT_LENGTH  = 2000
-# Keep recent turns without overfilling an 8k context window.
-MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "16000"))
+# Keep recent turns within the reduced-context serverless profile.
+MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "4000"))
 
 # ── Prompt injection patterns ─────────────────────────────────────────────────
 INJECTION_PATTERNS = [

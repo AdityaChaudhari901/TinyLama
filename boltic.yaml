@@ -24,11 +24,11 @@ environment:
     - name: PYTHONUNBUFFERED
       value: "1"
     - name: OLLAMA_NUM_PARALLEL
-      value: "2"
+      value: "1"
     - name: OLLAMA_NUM_THREADS
-      value: "6"
+      value: "4"
     - name: GOMEMLIMIT
-      value: 24576MiB
+      value: 3500MiB
     - name: RATE_LIMIT
       value: "120/minute"
     - name: MAX_QUEUE_DEPTH
@@ -38,23 +38,25 @@ environment:
     - name: DEFAULT_TEMPERATURE
       value: "0.2"
     - name: DEFAULT_NUM_PREDICT
-      value: "384"
+      value: "256"
     - name: DEFAULT_NUM_CTX
-      value: "8192"
+      value: "2048"
     - name: MAX_HISTORY_CHARS
-      value: "16000"
+      value: "4000"
     - name: OLLAMA_MAX_VRAM
-      value: "30064771072"
+      value: "4294967296"
     - name: OLLAMA_LLM_LIBRARY
       value: cpu
     - name: OLLAMA_KEEP_ALIVE
-      value: "-1"
+      value: "0"
     - name: OLLAMA_MAX_LOADED_MODELS
       value: "1"
     - name: OLLAMA_FLASH_ATTENTION
       value: "1"
     - name: OLLAMA_KV_CACHE_TYPE
       value: q8_0
+    - name: OLLAMA_USE_MMAP
+      value: "1"
 serverlessConfig:
     Env:
         APPLICATION_ENV_PREFIX: BOLT

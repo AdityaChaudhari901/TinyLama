@@ -10,16 +10,17 @@ echo "=========================================="
 # ── 1. Apply Ollama config (boltic does not inject env vars reliably) ─────────
 export OLLAMA_HOST=127.0.0.1:11434
 export OLLAMA_MODELS=${OLLAMA_MODELS:-/app/.ollama/models}
-export OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
-export OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-6}
-export OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
+export OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-1}
+export OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-4}
+export OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-0}
 export OLLAMA_FLASH_ATTENTION=${OLLAMA_FLASH_ATTENTION:-1}
 export OLLAMA_KV_CACHE_TYPE=${OLLAMA_KV_CACHE_TYPE:-q8_0}
 export OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS:-1}
 export OLLAMA_LLM_LIBRARY=${OLLAMA_LLM_LIBRARY:-cpu}
-export GOMEMLIMIT=${GOMEMLIMIT:-24576MiB}
+export OLLAMA_USE_MMAP=${OLLAMA_USE_MMAP:-1}
+export GOMEMLIMIT=${GOMEMLIMIT:-3500MiB}
 
-echo "Ollama config: parallel=$OLLAMA_NUM_PARALLEL threads=$OLLAMA_NUM_THREADS keep_alive=$OLLAMA_KEEP_ALIVE flash_attn=$OLLAMA_FLASH_ATTENTION"
+echo "Ollama config: parallel=$OLLAMA_NUM_PARALLEL threads=$OLLAMA_NUM_THREADS keep_alive=$OLLAMA_KEEP_ALIVE flash_attn=$OLLAMA_FLASH_ATTENTION mmap=$OLLAMA_USE_MMAP"
 
 # ── 2. Start Ollama server ────────────────────────────────────────────────────
 echo "Starting Ollama server..."
