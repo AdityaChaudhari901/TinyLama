@@ -8,10 +8,6 @@ deploy:
     resources:
         cpu: "16"
         memory: 32Gi
-    volumes:
-        - name: ollama-models
-          mountPath: /root/.ollama
-          size: 25Gi
 environment:
     - name: PORT
       value: "8080"
@@ -19,6 +15,8 @@ environment:
       value: gemma3:4b
     - name: OLLAMA_HOST
       value: 127.0.0.1:11434
+    - name: OLLAMA_MODELS
+      value: /app/.ollama/models
     - name: PYTHONUNBUFFERED
       value: "1"
     - name: OLLAMA_NUM_PARALLEL

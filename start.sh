@@ -9,6 +9,7 @@ echo "=========================================="
 
 # ── 1. Apply Ollama config (boltic does not inject env vars reliably) ─────────
 export OLLAMA_HOST=127.0.0.1:11434
+export OLLAMA_MODELS=${OLLAMA_MODELS:-/app/.ollama/models}
 export OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-2}
 export OLLAMA_NUM_THREADS=${OLLAMA_NUM_THREADS:-6}
 export OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:--1}
@@ -35,30 +36,23 @@ for i in $(seq 1 50); do
     sleep 3
 done
 
-# ── 4. Start FastAPI immediately so Nomad health checks pass ──────────────────
-# The /health endpoint returns ok:true regardless of model state, so Nomad
-# marks the allocation healthy within seconds. Model pull happens in background.
+# ── 4. Verify the image already contains the configured model ─────────────────
+if ! ollama list 2>/dev/null | grep -q "$MODEL"; then
+    echo "Bundled model $MODEL was not found in OLLAMA_MODELS=$OLLAMA_MODELS"
+    exit 1
+fi
+
+# ── 5. Start FastAPI after Ollama is healthy ──────────────────────────────────
 echo "Starting FastAPI on port $PORT..."
 python3 -m uvicorn app:app --host 0.0.0.0 --port "$PORT" --log-level info &
 UVICORN_PID=$!
 
-# ── 5. Pull model in the background ──────────────────────────────────────────
-echo "Pulling model $MODEL in background..."
+# ── 6. Warm up the bundled model in the background ────────────────────────────
+echo "Warming up bundled model $MODEL..."
 (
-    if ollama list 2>/dev/null | grep -q "$MODEL"; then
-        echo "Model $MODEL already present — skipping pull."
-    else
-        echo "Model $MODEL not found — pulling now..."
-        for attempt in 1 2 3; do
-            ollama pull "$MODEL" && echo "Model pull succeeded." && break
-            echo "Pull attempt $attempt failed — retrying in 10 s..."
-            sleep 10
-        done
-    fi
-    echo "Warming up model $MODEL into RAM..."
     ollama run "$MODEL" "hi" --nowordwrap 2>/dev/null || true
     echo "Model $MODEL is warm and ready."
 ) &
 
-# ── 6. Wait for either process to exit (keeps script alive) ──────────────────
+# ── 7. Wait for either process to exit (keeps script alive) ──────────────────
 wait $UVICORN_PID
