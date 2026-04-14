@@ -34,17 +34,17 @@ environment:
     - name: MAX_QUEUE_DEPTH
       value: "8"
     - name: QUEUE_TIMEOUT_SECONDS
-      value: "20"
+      value: "45"
     - name: DEFAULT_TEMPERATURE
-      value: "0.2"
+      value: "0.45"
     - name: DEFAULT_NUM_PREDICT
-      value: "1024"
+      value: "2048"
     - name: DEFAULT_NUM_CTX
-      value: "8192"
+      value: "16384"
     - name: DEFAULT_NUM_BATCH
-      value: "128"
+      value: "512"
     - name: MAX_HISTORY_CHARS
-      value: "20000"
+      value: "40000"
     - name: OLLAMA_LLM_LIBRARY
       value: cpu
     - name: OLLAMA_KEEP_ALIVE

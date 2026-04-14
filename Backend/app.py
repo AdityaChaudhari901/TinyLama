@@ -33,15 +33,15 @@ MODEL              = os.getenv("MODEL", "gemma3:4b")
 OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "1"))
 NUM_THREADS        = int(os.getenv("OLLAMA_NUM_THREADS", "4"))
 RATE_LIMIT         = os.getenv("RATE_LIMIT", "120/minute")
-QUEUE_TIMEOUT_SECONDS = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "20"))
+QUEUE_TIMEOUT_SECONDS = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "45"))
 MAX_QUEUE_DEPTH    = int(os.getenv("MAX_QUEUE_DEPTH", "8"))
-DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.2"))
-DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "256"))
-DEFAULT_NUM_CTX    = int(os.getenv("DEFAULT_NUM_CTX", "2048"))
-DEFAULT_NUM_BATCH  = int(os.getenv("DEFAULT_NUM_BATCH", "64"))
+DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.45"))
+DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "2048"))
+DEFAULT_NUM_CTX    = int(os.getenv("DEFAULT_NUM_CTX", "16384"))
+DEFAULT_NUM_BATCH  = int(os.getenv("DEFAULT_NUM_BATCH", "512"))
 MODEL_READY_TTL_SECONDS = float(os.getenv("MODEL_READY_TTL_SECONDS", "5"))
 USE_MMAP          = os.getenv("OLLAMA_USE_MMAP", "1").strip().lower() not in {"0", "false", "no", "off"}
-KEEP_ALIVE        = os.getenv("OLLAMA_KEEP_ALIVE", "0")
+KEEP_ALIVE        = os.getenv("OLLAMA_KEEP_ALIVE", "-1")
 
 ALLOWED_ORIGINS = [
     o.strip()
@@ -51,7 +51,7 @@ ALLOWED_ORIGINS = [
 
 MAX_INPUT_LENGTH  = int(os.getenv("MAX_INPUT_LENGTH", "2000"))
 # Keep recent turns within the reduced-context serverless profile.
-MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "4000"))
+MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "40000"))
 
 # ── Prompt injection patterns ─────────────────────────────────────────────────
 INJECTION_PATTERNS = [
