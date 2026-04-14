@@ -24,7 +24,7 @@ environment:
     - name: PYTHONUNBUFFERED
       value: "1"
     - name: OLLAMA_NUM_PARALLEL
-      value: "1"
+      value: "4"
     - name: OLLAMA_NUM_THREADS
       value: "4"
     - name: GOMEMLIMIT
@@ -32,7 +32,7 @@ environment:
     - name: RATE_LIMIT
       value: "120/minute"
     - name: MAX_QUEUE_DEPTH
-      value: "8"
+      value: "16"
     - name: QUEUE_TIMEOUT_SECONDS
       value: "45"
     - name: DEFAULT_TEMPERATURE
