@@ -94,18 +94,25 @@ SYSTEM_PERSONALITY = os.getenv(
     "You are Fynd AI, a product shopping assistant for the Fynd catalog.\n"
     "STRICT RULES — follow every rule exactly, no exceptions:\n"
     "1. Greetings/small talk (e.g. 'hi', 'thanks'): reply briefly WITHOUT calling any tools.\n"
-    "2. ANY product question: you MUST call search_products. Never skip this step.\n"
+    "2. ANY product question or browse request: you MUST call search_products. Never skip this step. "
+    "Use the most specific query possible — e.g. 'running shoes' or 'athletic shoes', not just 'shoes'.\n"
     "3. Use ONLY data returned by tools. NEVER use your training knowledge about products, brands, specs, or prices.\n"
     "4. If search_products returns found=false OR returns products that do not match the request: "
     "respond EXACTLY with 'I don't have any products matching that in our catalog.' — nothing more.\n"
-    "5. NEVER mention, describe, or recommend any product not present in the tool result. "
-    "Do not name brands (Apple, Samsung, etc.) or models that were not returned by the tool.\n"
+    "5. NEVER mention, describe, or recommend any product not present in the tool result.\n"
     "6. Price filter: when user says 'under X' or 'below X', pass max_price=X to search_products. "
     "Show ONLY products within that range.\n"
-    "7. Similar/recommended products: call get_recommendations with the product_id from the search result. "
-    "If no product_id is available, say you need a specific product first. "
-    "If same_category_found=false in the result, say 'No similar [category] in our catalog — here are related products you might like:' before listing them.\n"
-    "8. Format: list each product with name, price, and 2-3 key features. Be concise."
+    "7. Brand/category filter: when user says 'show only [brand]', 'filter by [brand]', or 'show [category] products', "
+    "ALWAYS call search_products again with brand='brand_name' or category='category_name'. "
+    "NEVER filter previous results in-context — always make a fresh tool call with the correct filter.\n"
+    "8. Similar/recommended products: call get_recommendations with the product_id from the search result. "
+    "If no product_id is available, call search_products first to get one. "
+    "If same_category_found=false: say ONLY 'No similar [category] found in our catalog.' — do NOT list cross-category products as recommendations.\n"
+    "9. Full details request ('show full details', 'more info', 'tell me more'): show ALL fields of the "
+    "last product discussed — title, brand, category, price, rating, full description, all features, availability. "
+    "Do NOT call search_products again for this.\n"
+    "10. Default format: for each product always show — title, brand, price, rating, availability (in stock / out of stock), "
+    "full description, and all features. Never omit any of these fields. If a field is missing from the tool result, skip it silently."
 )
 
 def _resolve_temperature(value: float | None) -> float:
@@ -214,6 +221,7 @@ async def _load_from_boltic():
                 "category":     row.get("category", ""),
                 "price":        row.get("price", ""),
                 "rating":       row.get("rating", ""),
+                "description":  row.get("description", ""),
                 "features":     row.get("features", []),
                 "availability": row.get("availability", "In Stock"),
             },
@@ -341,58 +349,54 @@ async def search_products(
     query: str,
     max_price: float | None = None,
     min_price: float | None = None,
-    _precomputed_embedding: list[float] | None = None,  # injected by speculative embed
+    brand: str | None = None,
+    category: str | None = None,
+    top_k: int | None = None,
+    _precomputed_embedding: list[float] | None = None,
 ) -> dict:
-    """
-    Search the product knowledge base using semantic similarity.
-    Supports optional price range filtering.
-    When price filter is active, scans the full catalog by price first,
-    then re-ranks by semantic relevance to the query.
-    _precomputed_embedding: skip the embed() call if already computed in parallel.
-    """
-    logger.info(f"[tool:search_products] query={query!r} max_price={max_price} min_price={min_price}")
+    logger.info(f"[tool:search_products] query={query!r} max_price={max_price} brand={brand} category={category}")
     try:
-        price_filter = max_price is not None or min_price is not None
+        n = min(top_k or RAG_TOP_K, 20)
 
-        if price_filter:
-            # Scan ALL products for price match — no similarity threshold applied
-            price_matched = []
-            for p in _product_store:
-                price = _parse_price(p.get("metadata", {}).get("price"))
-                if price is None:
-                    continue
-                if max_price is not None and price > max_price:
-                    continue
-                if min_price is not None and price < min_price:
-                    continue
-                price_matched.append(p)
+        def _passes_filters(p: dict) -> bool:
+            meta = p.get("metadata", {})
+            if brand and brand.lower() not in meta.get("brand", "").lower():
+                return False
+            if category and category.lower() not in meta.get("category", "").lower():
+                return False
+            if max_price is not None:
+                price = _parse_price(meta.get("price"))
+                if price is None or price > max_price:
+                    return False
+            if min_price is not None:
+                price = _parse_price(meta.get("price"))
+                if price is None or price < min_price:
+                    return False
+            return True
 
-            # Re-rank by semantic similarity to the query (if any products found)
-            if price_matched and query.strip():
-                q_emb = _precomputed_embedding or await _embed(query)
-                scored = [
-                    (_cosine_similarity(q_emb, p["embedding"]), p)
-                    for p in price_matched
-                ]
-                scored.sort(key=lambda x: x[0], reverse=True)
-                results = [p for _, p in scored]
-            else:
-                results = price_matched
+        # Filter the full catalog by brand/category/price first
+        pool = [p for p in _product_store if _passes_filters(p)]
 
+        if not pool:
+            return {"found": False, "products": [], "source": "knowledge_base"}
+
+        # Semantic search within filtered pool
+        q_emb = _precomputed_embedding or await _embed(query)
+        scored = [(_cosine_similarity(q_emb, p["embedding"]), p) for p in pool]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # Apply similarity threshold only when no brand/category/price filter is active
+        # (filters already narrow the pool, threshold would be too aggressive on top)
+        has_filter = brand or category or max_price is not None or min_price is not None
+        if has_filter:
+            results = [p for _, p in scored[:n]]
         else:
-            # Normal semantic search with threshold
-            q_emb = _precomputed_embedding or await _embed(query)
-            results = _vector_search(q_emb)
-
-            # Only fall back to keyword search when vector search returns nothing.
-            # Merging keyword results unconditionally caused off-topic products to
-            # appear (e.g. a gaming mouse showing up in "gaming console" results).
+            results = [p for score, p in scored[:n] if score >= RAG_SIMILARITY_THRESHOLD]
             if not results:
                 logger.info("[tool:search_products] vector miss — trying keyword fallback")
-                results = _keyword_search(query)
+                results = _keyword_search(query)[:n]
 
-        # Deduplicate by title and cap
-        results = _deduplicate(results)[:RAG_TOP_K]
+        results = _deduplicate(results)[:n]
 
         if results:
             products = [
@@ -447,13 +451,13 @@ async def get_recommendations(product_id: str) -> dict:
     ]
     scored.sort(key=lambda x: x[0], reverse=True)
 
-    # Prefer same-category products first, then fill with best cross-category.
-    # No minimum threshold — for recommendations the user always wants results;
-    # niche categories (e.g. only one gaming console) would return nothing otherwise.
     same_cat  = [(s, p) for s, p in scored if p.get("metadata", {}).get("category", "").lower().strip() == source_category]
-    cross_cat = [(s, p) for s, p in scored if p.get("metadata", {}).get("category", "").lower().strip() != source_category]
+    # Only include cross-category if similarity is genuinely high (≥0.60) — avoids
+    # unrelated products (e.g. earbuds filling shoe recommendations).
+    cross_cat = [(s, p) for s, p in scored
+                 if p.get("metadata", {}).get("category", "").lower().strip() != source_category
+                 and s >= 0.60]
 
-    # Fill up to RAG_TOP_K: same-category first, then cross-category
     combined = same_cat[:RAG_TOP_K] + cross_cat[: max(0, RAG_TOP_K - len(same_cat))]
     combined = combined[:RAG_TOP_K]
 
@@ -493,7 +497,7 @@ TOOLS = [
                 "Search for products in the knowledge base using semantic similarity. "
                 "Supports optional price range filtering. "
                 "When the user specifies a price limit (e.g. 'under $50', 'below 500'), "
-                "always pass max_price. Returns matching products if found."
+                "Supports brand, category, and price range filtering, and pagination."
             ),
             "parameters": {
                 "type": "object",
@@ -502,13 +506,25 @@ TOOLS = [
                         "type": "string",
                         "description": "Natural language product search query, e.g. 'running shoes' or 'Samsung phones'",
                     },
+                    "brand": {
+                        "type": "string",
+                        "description": "Filter by brand, e.g. 'Apple', 'Sony', 'Nike'. Use when user says 'show only [brand]'.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "description": "Filter by product category, e.g. 'shoes', 'headphones', 'laptops'.",
+                    },
                     "max_price": {
                         "type": "number",
-                        "description": "Maximum price (numeric, no currency symbol). Use when user says 'under X', 'below X', 'less than X'.",
+                        "description": "Maximum price (numeric). Use when user says 'under X', 'below X'.",
                     },
                     "min_price": {
                         "type": "number",
                         "description": "Minimum price (numeric). Use when user says 'above X', 'more than X'.",
+                    },
+                    "top_k": {
+                        "type": "integer",
+                        "description": "Number of results (default 5, max 20). Use when user says 'show more' or specifies a count.",
                     },
                 },
                 "required": ["query"],
@@ -546,6 +562,19 @@ TOOL_MAP = {
 }
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
+KB_RELOAD_INTERVAL = int(os.getenv("KB_RELOAD_INTERVAL", "300"))  # seconds, default 5 min
+
+async def _periodic_reload():
+    """Re-sync all workers from Boltic every KB_RELOAD_INTERVAL seconds."""
+    while True:
+        await asyncio.sleep(KB_RELOAD_INTERVAL)
+        try:
+            await _load_from_boltic()
+            logger.info("[kb] periodic reload complete — %d products", len(_product_store))
+        except Exception as e:
+            logger.error("[kb] periodic reload failed: %s", e)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global _http_client
@@ -558,6 +587,7 @@ async def lifespan(_: FastAPI):
     else:
         logger.info("OpenRouter ready | chat=%s | embed=%s", MODEL, EMBEDDINGS_MODEL)
     await _load_from_boltic()
+    asyncio.create_task(_periodic_reload())
     yield
     if _http_client:
         await _http_client.aclose()
@@ -671,6 +701,14 @@ async def health():
 @app.get("/metrics")
 async def metrics():
     return {**_metrics, "model": MODEL, "kb_size": len(_product_store)}
+
+
+@app.post("/admin/reload")
+async def admin_reload():
+    """Force-reload the knowledge base from Boltic for this worker."""
+    before = len(_product_store)
+    await _load_from_boltic()
+    return {"ok": True, "before": before, "after": len(_product_store)}
 
 
 # ── Knowledge base CRUD ───────────────────────────────────────────────────────
@@ -814,11 +852,12 @@ async def upload_file(file: UploadFile = File(...)):
                     "text":       text,
                     "embedding":  embedding,
                     "metadata":   {
-                        "brand":    row.get("brand", ""),
-                        "category": row.get("category", ""),
-                        "price":    row.get("price", ""),
-                        "rating":   row.get("rating", ""),
-                        "features": row.get("features", "").split(";"),
+                        "brand":        row.get("brand", ""),
+                        "category":     row.get("category", ""),
+                        "price":        row.get("price", ""),
+                        "rating":       row.get("rating", ""),
+                        "description":  row.get("description", ""),
+                        "features":     row.get("features", "").split(";"),
                         "availability": row.get("availability", "In Stock"),
                     },
                     "source":     "upload",
