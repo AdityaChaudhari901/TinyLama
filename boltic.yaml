@@ -6,58 +6,55 @@ deploy:
     minInstances: 1
     port: 8080
     resources:
-        cpu: "4"
+        cpu: "8"
         memory: 32Gi
-    volumes:
-        - mountPath: /app/.ollama
-          name: ollama-models
-          size: 25Gi
 environment:
     - name: PORT
       value: "8080"
+    - name: OPENROUTER_API_KEY
+      value: "${OPENROUTER_API_KEY}"
     - name: MODEL
-      value: gemma3:4b
-    - name: OLLAMA_HOST
-      value: 127.0.0.1:11434
-    - name: OLLAMA_MODELS
-      value: /app/.ollama/models
-    - name: PYTHONUNBUFFERED
-      value: "1"
-    - name: OLLAMA_NUM_PARALLEL
-      value: "4"
-    - name: OLLAMA_NUM_THREADS
-      value: "4"
-    - name: GOMEMLIMIT
-      value: 28000MiB
-    - name: RATE_LIMIT
-      value: 120/minute
-    - name: MAX_QUEUE_DEPTH
-      value: "16"
-    - name: QUEUE_TIMEOUT_SECONDS
-      value: "45"
+      value: openai/gpt-4o-mini
+    - name: EMBEDDINGS_MODEL
+      value: openai/text-embedding-3-small
     - name: DEFAULT_TEMPERATURE
       value: "0.45"
-    - name: DEFAULT_NUM_PREDICT
+    - name: DEFAULT_MAX_TOKENS
       value: "2048"
-    - name: DEFAULT_NUM_CTX
-      value: "16384"
-    - name: DEFAULT_NUM_BATCH
-      value: "512"
+    - name: MAX_INPUT_LENGTH
+      value: "2000"
     - name: MAX_HISTORY_CHARS
       value: "40000"
-    - name: OLLAMA_LLM_LIBRARY
-      value: cpu
-    - name: OLLAMA_KEEP_ALIVE
-      value: "-1"
-    - name: OLLAMA_MAX_LOADED_MODELS
+    - name: APP_SITE_URL
+      value: "https://llama-qwen-e5b9730c.serverless.boltic.app"
+    - name: APP_TITLE
+      value: "Fynd AI"
+    - name: BOLTIC_TOKEN
+      value: "15647a83-d0be-4e24-b352-97bbc688d695"
+    - name: BOLTIC_PRODUCTS_TABLE
+      value: "735364bf-48e3-4723-b549-e3e123562d2a"
+    - name: BOLTIC_RECS_TABLE
+      value: "db2b84be-744e-4e16-a369-d3d7d17b2ec4"
+    - name: PYTHONUNBUFFERED
       value: "1"
-    - name: OLLAMA_FLASH_ATTENTION
-      value: "1"
-    - name: OLLAMA_KV_CACHE_TYPE
-      value: q8_0
-    - name: OLLAMA_USE_MMAP
-      value: "1"
+    - name: WEB_CONCURRENCY
+      value: "6"
 serverlessConfig:
+    Env:
+        APPLICATION_ENV_PREFIX: BOLT
+        BOLT_APPLICATION_ACCOUNT_ID: b274cb0b-f8b2-4aac-b79f-71eb7d2e3fe5
+        BOLT_APPLICATION_AUTO_STOP: "false"
+        BOLT_APPLICATION_CODE_TYPE: ""
+        BOLT_APPLICATION_LANGUAGE: python/3.11
+        BOLT_APPLICATION_MAX_IDLE_TIME: "300"
+        BOLT_APPLICATION_NAME: llama Qwen
+        BOLT_APPLICATION_ORG_ID: b274cb0b-f8b2-4aac-b79f-71eb7d2e3fe5
+        BOLT_APPLICATION_PORT: "8080"
+        BOLT_APPLICATION_PROTOCOL: http
+        BOLT_APPLICATION_REGION_ID: asia-south1
+        BOLT_APPLICATION_RUNTIME: docker
+        BOLT_APPLICATION_SLUG: llama-qwen
+        BOLT_APPLICATION_VERSION: "0"
     PortMap:
         - Protocol: http
           Port: 8080
@@ -71,9 +68,9 @@ serverlessConfig:
         CPU: 8
         MemoryMB: 32768
         MemoryMaxMB: 32768
-        DiskMB: 100
-    Timeout: 60
+        DiskMB: 4096
+    Timeout: 120
 service:
-    description: Ollama Gemma3 4B AI Assistant — React frontend + FastAPI backend
-    name: ollama-ai-assistant
+    description: Fynd AI — React frontend + FastAPI + OpenRouter
+    name: fynd-ai
 version: "1"

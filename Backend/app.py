@@ -1,23 +1,26 @@
 import os
-import uuid
-import httpx
 import re
-import logging
+import uuid
+import math
 import asyncio
+import httpx
+import logging
 import time
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI, HTTPException, Request
+import csv
+import io
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, field_validator
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()  # loads Backend/.env (or .env in cwd) into os.environ
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -27,501 +30,570 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-PORT               = int(os.getenv("PORT", "8080"))
-OLLAMA_URL         = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434")
-MODEL              = os.getenv("MODEL", "gemma3:4b")
-OLLAMA_NUM_PARALLEL = int(os.getenv("OLLAMA_NUM_PARALLEL", "4"))
-NUM_THREADS        = int(os.getenv("OLLAMA_NUM_THREADS", "4"))
-RATE_LIMIT         = os.getenv("RATE_LIMIT", "120/minute")
-QUEUE_TIMEOUT_SECONDS = float(os.getenv("QUEUE_TIMEOUT_SECONDS", "45"))
-MAX_QUEUE_DEPTH    = int(os.getenv("MAX_QUEUE_DEPTH", "16"))
+PORT                = int(os.getenv("PORT", "8080"))
+OPENROUTER_API_KEY  = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_URL      = "https://openrouter.ai/api/v1/chat/completions"
+EMBEDDINGS_URL      = "https://openrouter.ai/api/v1/embeddings"
+MODEL               = os.getenv("MODEL", "openai/gpt-4o-mini")
+EMBEDDINGS_MODEL    = os.getenv("EMBEDDINGS_MODEL", "openai/text-embedding-3-small")
 DEFAULT_TEMPERATURE = float(os.getenv("DEFAULT_TEMPERATURE", "0.45"))
-DEFAULT_NUM_PREDICT = int(os.getenv("DEFAULT_NUM_PREDICT", "2048"))
-DEFAULT_NUM_CTX    = int(os.getenv("DEFAULT_NUM_CTX", "16384"))
-DEFAULT_NUM_BATCH  = int(os.getenv("DEFAULT_NUM_BATCH", "512"))
-MODEL_READY_TTL_SECONDS = float(os.getenv("MODEL_READY_TTL_SECONDS", "5"))
-USE_MMAP          = os.getenv("OLLAMA_USE_MMAP", "1").strip().lower() not in {"0", "false", "no", "off"}
-KEEP_ALIVE        = os.getenv("OLLAMA_KEEP_ALIVE", "-1")
+DEFAULT_MAX_TOKENS  = int(os.getenv("DEFAULT_MAX_TOKENS", "2048"))
+MAX_INPUT_LENGTH    = int(os.getenv("MAX_INPUT_LENGTH", "2000"))
+MAX_HISTORY_CHARS   = int(os.getenv("MAX_HISTORY_CHARS", "40000"))
+APP_SITE_URL        = os.getenv("APP_SITE_URL", "https://fynd-ai.app")
+APP_TITLE           = os.getenv("APP_TITLE", "Fynd AI")
+RAG_SIMILARITY_THRESHOLD = float(os.getenv("RAG_SIMILARITY_THRESHOLD", "0.50"))
+RAG_TOP_K           = int(os.getenv("RAG_TOP_K", "5"))
+
+# ── Boltic Table config ───────────────────────────────────────────────────────
+BOLTIC_TOKEN         = os.getenv("BOLTIC_TOKEN", "")
+BOLTIC_API_BASE      = "https://api.boltic.fynd.com/asia-south1/service/panel/boltic-tables/v1/tables"
+BOLTIC_PRODUCTS_TABLE      = os.getenv("BOLTIC_PRODUCTS_TABLE", "735364bf-48e3-4723-b549-e3e123562d2a")
+BOLTIC_RECS_TABLE          = os.getenv("BOLTIC_RECS_TABLE", "db2b84be-744e-4e16-a369-d3d7d17b2ec4")
+BOLTIC_PAGE_SIZE     = 100  # Boltic API max rows per page
 
 ALLOWED_ORIGINS = [
     o.strip()
-    for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:5174,http://localhost:4173").split(",")
+    for o in os.getenv(
+        "ALLOWED_ORIGINS",
+        "http://localhost:5173,http://localhost:5174,http://localhost:4173"
+    ).split(",")
     if o.strip()
 ]
 
-MAX_INPUT_LENGTH  = int(os.getenv("MAX_INPUT_LENGTH", "2000"))
-# Keep recent turns within the reduced-context serverless profile.
-MAX_HISTORY_CHARS = int(os.getenv("MAX_HISTORY_CHARS", "40000"))
-
-# ── Prompt injection patterns ─────────────────────────────────────────────────
-INJECTION_PATTERNS = [
-    r"ignore\s+previous\s+instructions",
-    r"ignore\s+all\s+instructions",
-    r"disregard\s+previous",
-    r"you\s+are\s+now",
-    r"new\s+instructions:",
-    r"forget\s+(everything|all|your)",
-    r"act\s+as\s+if",
-    r"override\s+(your|the)\s+(instructions|rules|system)",
-    r"repeat\s+(after|the|your)\s+me",
-    r"system\s*:\s*",
-    r"###\s*instruction",
-    r"assistant\s*:\s*(?:ignore|disregard)",
-    r"DAN\s+mode",
-    r"developer\s+mode",
-    r"jailbreak",
-    r"sudo\s+mode",
-]
-
-# ── S1: Violent Crimes ────────────────────────────────────────────────────────
-S1_VIOLENT_CRIMES = [
-    r"\b(kill|murder|assassinate|execute)\s+(someone|people|person|him|her|them)\b",
-    r"\b(hurt|harm|injure|attack|beat|stab|shoot)\s+(someone|people|person|him|her|my\s+\w+|them)\b",
-    r"how\s+to\s+(kill|murder|assassinate|harm|hurt|injure|attack|stab|shoot)\b",
-    r"\b(terrorism|terrorist\s+attack|mass\s+shooting|mass\s+murder|genocide)\b",
-    r"\b(torture|mutilate|dismember|maim)\b",
-    r"I\s+want\s+to\s+(hurt|harm|kill|murder|beat|attack|stab|shoot)\b",
-    r"\b(assault|kidnap|abduct)\s+(someone|a\s+person|him|her|them)\b",
-    r"how\s+to\s+(commit|carry\s+out)\s+(a\s+)?(murder|assault|attack|kidnapping)\b",
-    r"\b(serial\s+killer|hitman|contract\s+kill)\b",
-    r"plan\s+(to\s+)?(kill|murder|attack|harm)\s+(someone|a\s+person|people)\b",
-    r"\b(arson|arsonist|firebomb|fire.?bomb|molotov)\b",
-    r"how\s+to\s+(blast|blow\s+up|destroy|burn\s+down|torch|set\s+(fire|alight)\s+to)\s+(a\s+)?(car|vehicle|building|house|property|bus|truck)\b",
-    r"\b(blast|blow\s+up)\s+(a\s+)?(car|vehicle|building|house|property)\b",
-    r"using\s+(petrol|gasoline|fuel|accelerant).{0,40}(burn|blast|destroy|set\s+fire|torch|ignite)\b",
-    r"(pour|splash|douse).{0,30}(petrol|gasoline|fuel|accelerant).{0,30}(car|vehicle|building|house)\b",
-    r"how\s+to\s+(start\s+a\s+fire|ignite).{0,30}(car|vehicle|building|house)\b",
-]
-
-# ── S2: Non-Violent Crimes ────────────────────────────────────────────────────
-S2_NONVIOLENT_CRIMES = [
-    r"\b(hack|exploit|breach|crack)\s+(into|a\s+)?(system|network|account|password|server|database)\b",
-    r"how\s+to\s+(steal|rob|shoplift|burglarize|break\s+into|pick\s+a\s+lock)\b",
-    r"\b(forge|counterfeit|fake)\s+(money|currency|documents|id|passport|signature|check)\b",
-    r"\b(fraud|scam|phishing|identity\s+theft|ponzi|embezzle)\b",
-    r"how\s+to\s+(launder|hide)\s+money\b",
-    r"\b(ransomware|malware|trojan|keylogger|spyware)\s+(create|build|make|deploy|install)\b",
-    r"how\s+to\s+(evade|avoid)\s+(taxes|tax|the\s+irs|customs)\b",
-    r"how\s+to\s+(hotwire|steal)\s+(a\s+)?(car|vehicle)\b",
-    r"\b(bribe|blackmail|extort)\s+(someone|a\s+person|official|police)\b",
-    r"how\s+to\s+make\s+(fake|counterfeit)\s+(money|currency|bills?|id|documents?)\b",
-]
-
-# ── S3: Sex-Related Crimes ────────────────────────────────────────────────────
-S3_SEX_CRIMES = [
-    r"\b(rape|sexual\s+assault|molest)\s+(someone|a\s+person|him|her|them)\b",
-    r"how\s+to\s+(drug|spike)\s+(someone.{0,20}drink|a\s+drink)\b",
-    r"how\s+to\s+(get\s+away\s+with|commit)\s+(rape|sexual\s+assault)\b",
-    r"\b(sex\s+trafficking|human\s+trafficking)\b",
-    r"how\s+to\s+(coerce|force|pressure)\s+someone\s+(into\s+sex|to\s+have\s+sex)\b",
-    r"\b(non.?consensual|without\s+consent).{0,40}(sex|intercourse|touching)\b",
-    r"how\s+to\s+(film|record)\s+someone\s+(without|secretly).{0,30}(naked|sex|nude)\b",
-]
-
-# ── S4: Child Sexual Exploitation ─────────────────────────────────────────────
-S4_CHILD_SAFETY = [
-    r"\b(child|minor|underage|kid|teen).{0,50}(sexual|explicit|porn|nude|naked|erotic)\b",
-    r"\b(pedophile|pedophilia|child\s+sexual\s+abuse|csam|csem)\b",
-    r"\b(groom|grooming)\s+(a\s+)?(child|minor|kid|teen)\b",
-    r"how\s+to\s+(attract|seduce|approach)\s+(children|minors|kids|a\s+child|a\s+minor)\b",
-    r"sexual.{0,30}(child|minor|kid|underage|teen)\b",
-]
-
-# ── S5: Defamation ────────────────────────────────────────────────────────────
-S5_DEFAMATION = [
-    r"write\s+(a\s+)?(fake|false|fabricated|made.up)\s+(story|article|news|post|review).{0,40}(about|against)\b",
-    r"make\s+(someone|a\s+person|him|her)\s+look\s+(guilty|criminal|bad|evil)\s+(with\s+)?(false|fake|lies)\b",
-    r"spread\s+(false|fake|fabricated)\s+(rumor|information|news|story)\s+(about|against)\b",
-    r"how\s+to\s+(defame|slander|libel)\s+(someone|a\s+person)\b",
-    r"(create|write|generate)\s+(fake|false)\s+(accusation|allegation).{0,30}(against|about)\b",
-]
-
-# ── S6: Specialized Advice ────────────────────────────────────────────────────
-S6_SPECIALIZED_ADVICE = [
-    r"how\s+to\s+(make|build|create|synthesize|produce)\s+(poison|toxin|venom|ricin|sarin|vx\s+gas|nerve\s+agent)\b",
-    r"\b(poison|toxic|lethal)\s+(dose|amount|quantity).{0,30}(kill|harm|hurt|injure|murder)\b",
-    r"how\s+to\s+(make|create|brew|distill)\s+(methamphetamine|meth|crystal\s+meth|heroin|fentanyl|crack)\b",
-    r"\b(drug|cocaine|coke|heroin|meth|mdma|lsd|ecstasy|fentanyl)\s+(make|manufacture|produce|cook|synthesize|create)\b",
-    r"how\s+(do|can|to)\s+(I|we|you)\s+(make|get|buy|produce|cook|synthesize|consume|use|take)\s+.*(cocaine|coke|heroin|meth|drug|mdma|lsd|fentanyl)\b",
-    r"how\s+to\s+(consume|use|take|smoke|snort|inject|ingest|do|try|buy|get|make|cook|produce)\s+.*(cocaine|coke|heroin|meth|drugs|mdma|lsd|fentanyl|crack|ecstasy)\b",
-    r"\bI\s+want\s+(to\s+)?(do|try|take|use|buy|get|make|consume)\s+(drugs|cocaine|coke|meth|heroin|mdma|lsd|fentanyl)\b",
-    r"where\s+(can|do)\s+I\s+(buy|get|find)\s+(drugs|cocaine|coke|heroin|meth|mdma|lsd)\b",
-    r"\b(sell|deal|traffic)\s+(drugs|cocaine|coke|heroin|meth|mdma|lsd)\b",
-    r"\b(snort|inject|shoot\s+up)\s+(cocaine|coke|heroin|meth|crack)\b",
-]
-
-# ── S7: Privacy ───────────────────────────────────────────────────────────────
-S7_PRIVACY = [
-    r"how\s+to\s+(stalk|track|spy\s+on|surveil|monitor)\s+(someone|a\s+person|him|her)\s+(without|secretly)\b",
-    r"how\s+to\s+(find|get|access)\s+(someone.{0,20})?(address|location|phone\s+number|ssn|social\s+security)\s+without\b",
-    r"\b(dox|doxx|doxing|doxxing)\s+(someone|a\s+person|him|her)\b",
-    r"how\s+to\s+(hack|access|break\s+into)\s+(someone.{0,20})?(email|account|phone|device|computer)\b",
-    r"how\s+to\s+(install|put)\s+(spyware|stalkerware|keylogger|tracking\s+software)\s+on\s+(someone|their)\b",
-    r"\b(non.?consensual|without\s+permission|without\s+consent).{0,40}(photo|image|video|record|film|share)\b",
-]
-
-# ── S8: Intellectual Property ─────────────────────────────────────────────────
-S8_IP = [
-    r"how\s+to\s+(pirate|illegally\s+download|torrent)\s+(movies?|music|software|games?|books?)\b",
-    r"how\s+to\s+(bypass|crack|remove|circumvent)\s+(drm|copyright\s+protection|license)\b",
-    r"(copy|reproduce|steal|plagiarize).{0,30}(copyrighted|patented|trademarked)\s+(work|content|material|code|design)\b",
-    r"how\s+to\s+(sell|distribute)\s+(pirated|cracked|stolen)\s+(software|content|movies?|music)\b",
-]
-
-# ── S9: Indiscriminate Weapons ────────────────────────────────────────────────
-S9_WEAPONS = [
-    r"\b(bomb|explosive|detonate|c4|dynamite|grenade|ied|pipe\s+bomb|landmine|claymore)\b",
-    r"how\s+to\s+(make|build|create|assemble|construct)\s+(a\s+)?(bomb|explosive|grenade|ied|pipe\s+bomb|landmine)\b",
-    r"\b(nuclear|biological|chemical|radiological)\s+(weapon|bomb|attack|agent|warfare)\b",
-    r"how\s+to\s+(enrich|obtain|acquire)\s+(uranium|plutonium|radioactive)\b",
-    r"\b(anthrax|smallpox|plague|ebola|bioweapon|bio.?weapon)\b",
-    r"how\s+to\s+(synthesize|produce|make|weaponize)\s+(sarin|vx|mustard\s+gas|nerve\s+agent|chlorine\s+gas)\b",
-    r"\b(fully\s+automatic|convert.{0,20}semi.{0,10}auto|illegal\s+modification)\s+(gun|rifle|weapon|firearm)\b",
-    r"how\s+to\s+(3d\s+print|manufacture|make)\s+(a\s+)?(gun|firearm|weapon|suppressor|silencer)\b",
-    r"how\s+to\s+(obtain|buy|acquire)\s+(guns?|weapons?|firearms?|ammo)\s+(illegally|without\s+(a\s+)?background\s+check)\b",
-]
-
-# ── S10: Hate ─────────────────────────────────────────────────────────────────
-S10_HATE = [
-    r"\b(kill|exterminate|eliminate|wipe\s+out)\s+(all\s+)?(jews?|muslims?|christians?|black\s+people|white\s+people|gay|lgbtq|immigrants?)\b",
-    r"\b(white\s+supremacy|white\s+power|nazi|neo.?nazi|kkk|ku\s+klux\s+klan)\b",
-    r"\b(n[i1]gg[e3]r|ch[i1]nk|sp[i1]c|k[i1]ke|f[a4]gg[o0]t)\b",
-    r"\b(jews?|muslims?|blacks?|gays?|immigrants?|refugees?)\s+.{0,30}\b(inferior|subhuman|evil|filthy|vermin|animals?|parasites?)\b",
-    r"(write|create|generate|make).{0,30}(racist|antisemitic|islamophobic|homophobic|transphobic|sexist)\s+(joke|content|speech|post|story|propaganda)\b",
-    r"\b(racial|ethnic|religious)\s+(cleansing|purge|genocide)\b",
-    r"\b(supremacist|extremist|radicalize)\s+(group|ideology|content|propaganda)\b",
-]
-
-# ── S11: Suicide & Self-Harm ──────────────────────────────────────────────────
-S11_SELF_HARM = [
-    r"\b(suicide|kill\s+myself|end\s+my\s+life|take\s+my\s+life|end\s+it\s+all)\b",
-    r"\b(self[- ]?harm|cut\s+myself|hurt\s+myself|burn\s+myself)\b",
-    r"how\s+to\s+(commit\s+)?suicide",
-    r"\bI\s+want\s+to\s+(die|kill\s+myself|end\s+it|disappear\s+forever)\b",
-    r"how\s+to\s+(overdose|od)\s+(on|from)\b",
-    r"what\s+(pills?|drugs?|medication).{0,30}(kill|overdose|lethal|suicide)\b",
-    r"how\s+(many|much).{0,20}(pills?|tablets?|mg).{0,20}(kill|lethal|fatal|overdose)\b",
-    r"\b(methods?|ways?)\s+(to\s+)?(commit\s+)?suicide\b",
-    r"I\s+(am\s+going\s+to|will|plan\s+to)\s+(kill\s+myself|end\s+my\s+life|commit\s+suicide)\b",
-]
-
-# ── S12: Sexual Content ───────────────────────────────────────────────────────
-S12_SEXUAL = [
-    r"write\s+(a\s+)?(explicit|graphic|erotic|sexual|nsfw|pornographic)\s+(story|scene|content|description|fantasy)\b",
-    r"\b(porn|pornography|pornographic|explicit\s+sex|graphic\s+sex)\s+(create|write|generate|make|produce)\b",
-    r"describe\s+(in\s+detail\s+)?(sexual|explicit|erotic|graphic).{0,30}(act|scene|encounter)\b",
-    r"\b(sexual|erotic|explicit)\s+(roleplay|rp)\b",
-    r"(generate|create|write|make).{0,20}(nude|naked|topless|explicit)\s+(image|photo|picture|description)\b",
-]
-
-PATTERN_CATEGORIES = {
-    'S1_violent_crimes':     S1_VIOLENT_CRIMES,
-    'S2_nonviolent_crimes':  S2_NONVIOLENT_CRIMES,
-    'S3_sex_crimes':         S3_SEX_CRIMES,
-    'S4_child_safety':       S4_CHILD_SAFETY,
-    'S5_defamation':         S5_DEFAMATION,
-    'S6_specialized_advice': S6_SPECIALIZED_ADVICE,
-    'S7_privacy':            S7_PRIVACY,
-    'S8_ip':                 S8_IP,
-    'S9_weapons':            S9_WEAPONS,
-    'S10_hate':              S10_HATE,
-    'S11_self_harm':         S11_SELF_HARM,
-    'S12_sexual':            S12_SEXUAL,
-}
-
-REFUSAL_TEMPLATES = {
-    "S1_violent_crimes": (
-        "I can't help with requests that involve violent crimes or harming others. "
-        "If you're feeling angry or overwhelmed, I can help you think through safer ways to handle the situation."
-    ),
-    "S2_nonviolent_crimes": (
-        "I can't help with planning or carrying out illegal activities. "
-        "If you'd like, I can help you explore legal and constructive alternatives."
-    ),
-    "S3_sex_crimes": (
-        "I can't assist with content related to sexual crimes or non-consensual acts. "
-        "If you need support, please reach out to a trusted authority or helpline."
-    ),
-    "S4_child_safety": (
-        "I can't engage with content that involves minors in unsafe or exploitative contexts. "
-        "If you're concerned about a child's safety, please contact local authorities "
-        "or an appropriate child protection organization in your area."
-    ),
-    "S5_defamation": (
-        "I can't help create false or defamatory content about individuals or groups. "
-        "If you'd like help with factual, constructive writing, I'm happy to assist."
-    ),
-    "S6_specialized_advice": (
-        "I can't assist with obtaining, making, or using illegal drugs or dangerous substances. "
-        "If you're looking for information about health effects, treatment, "
-        "or recovery options, I'd be glad to help."
-    ),
-    "S7_privacy": (
-        "I can't help with accessing someone's private information, tracking, or surveilling "
-        "others without their consent. If you're trying to recover your own account, "
-        "I can guide you through legitimate recovery options."
-    ),
-    "S8_ip": (
-        "I can't help with pirating, plagiarizing, or circumventing intellectual property protections. "
-        "I can help you find legal ways to access or use the content you're looking for."
-    ),
-    "S9_weapons": (
-        "I can't help with requests involving weapons, explosives, or CBRN materials. "
-        "If you're feeling unsafe or threatened, please contact local emergency services."
-    ),
-    "S10_hate": (
-        "I can't assist with content that promotes hate, discrimination, or violence against "
-        "any individual or group. If you'd like help expressing concerns constructively, I'm here."
-    ),
-    "S11_self_harm": (
-        "I'm really sorry that you're feeling this way. I can't help with anything involving "
-        "self-harm or suicide. You don't have to handle this alone — "
-        "please reach out to iCall at 9152987821 (India) or a local crisis helpline. "
-        "I can help you find support resources."
-    ),
-    "S12_sexual": (
-        "I can't assist with generating explicit or pornographic content. "
-        "If you have questions about health, relationships, or wellness, I'm happy to help."
-    ),
-    "default": (
-        "I can't help with that request. If you'd like, tell me more about "
-        "what you're trying to accomplish and I'll do my best to help in a safe way."
-    ),
-}
-
-COMPILED_INJECTION_PATTERNS = [
-    re.compile(pattern, re.IGNORECASE) for pattern in INJECTION_PATTERNS
-]
-COMPILED_PATTERN_CATEGORIES = {
-    category: [re.compile(pattern, re.IGNORECASE) for pattern in patterns]
-    for category, patterns in PATTERN_CATEGORIES.items()
-}
-
-# ── Input validator ───────────────────────────────────────────────────────────
+# ── Input validation ──────────────────────────────────────────────────────────
 def validate_input(text: str) -> str:
     if not text or not text.strip():
         raise ValueError("Input cannot be empty")
     if len(text) > MAX_INPUT_LENGTH:
         raise ValueError(f"Input too long. Max {MAX_INPUT_LENGTH} characters")
-    for pattern in COMPILED_INJECTION_PATTERNS:
-        if pattern.search(text):
-            logger.warning(f"Prompt injection detected: {text[:100]}...")
-            raise ValueError("Prompt injection attempt detected")
-    for category, patterns in COMPILED_PATTERN_CATEGORIES.items():
-        for pattern in patterns:
-            if pattern.search(text):
-                logger.warning(f"Harmful content [{category}]: {text[:100]}...")
-                raise ValueError(REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default']))
     return text.strip()
-
-# ── LLM output cleaner ────────────────────────────────────────────────────────
-_STOP_MARKERS     = ["\nUser:", "\nQuestion:", "\n\nUser:", "\n\nQuestion:", "\nAI:", "\nAsker:"]
-_LEADING_PREFIXES = ["AI:", "Asker:", "Assistant:", "Answer:", "Response:"]
-
-def clean_llm_text(text: str) -> str:
-    for marker in _STOP_MARKERS:
-        if marker in text:
-            text = text.split(marker)[0].strip()
-    while True:
-        snapshot = text
-        for prefix in _LEADING_PREFIXES:
-            if text.lower().startswith(prefix.lower()):
-                text = text[len(prefix):].strip()
-                break
-        if snapshot == text:
-            break
-    return text
-
-# ── Output validator ──────────────────────────────────────────────────────────
-_HARMFUL_PHRASES = [
-    r"(?:drug|cocaine|heroin|meth).*(?:is a )?personal choice",
-    r"I can help you (?:make|create|build) (?:a bomb|weapon|explosive)",
-    r"here'?s?\s+how\s+to\s+(?:kill|murder|harm|blast|blow\s+up|burn|destroy|torch)",
-    r"you should (?:kill yourself|commit suicide|self[- ]?harm)",
-    r"step\s*\d+\.?.{0,80}(?:petrol|gasoline|fuel|accelerant|ignite|detonate|explode)",
-    r"(?:pour|splash|douse|add).{0,30}(?:petrol|gasoline|fuel).{0,30}(?:tank|car|engine)",
-    r"(?:blast|blow\s+up|torch|set\s+fire|burn\s+down).{0,30}(?:car|vehicle|building|house)",
-]
-
-COMPILED_HARMFUL_PHRASES = [
-    re.compile(pattern, re.IGNORECASE) for pattern in _HARMFUL_PHRASES
-]
-
-def validate_output(text: str) -> tuple[bool, str, str | None]:
-    if not text or not text.strip():
-        return True, text, None
-    for category, patterns in COMPILED_PATTERN_CATEGORIES.items():
-        for pattern in patterns:
-            if pattern.search(text):
-                logger.error(f"OUTPUT VIOLATION [{category}]: {text[:100]}...")
-                return False, REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default']), category
-    for phrase in COMPILED_HARMFUL_PHRASES:
-        if phrase.search(text):
-            logger.error(f"OUTPUT VIOLATION [harmful_phrase]: {text[:100]}...")
-            return False, REFUSAL_TEMPLATES['default'], 'harmful_phrase'
-    return True, text, None
 
 # ── Context window management ─────────────────────────────────────────────────
 def trim_to_context(messages: list[dict], max_chars: int = MAX_HISTORY_CHARS) -> list[dict]:
     """
-    Trim conversation history so total character count stays within budget.
-    Always keeps the most recent messages; older ones are dropped first.
-    The last user message is always preserved regardless of length.
+    Keep as many recent messages as fit within max_chars.
+    Always includes the last message. Never cuts a message mid-content.
+    Preserves user/assistant turn pairs — drops the older user msg if its
+    assistant reply can't fit, keeping the history coherent.
     """
-    total = 0
-    result = []
+    total, result = 0, []
     for msg in reversed(messages):
-        total += len(msg.get("content", ""))
-        if total > max_chars and result:
+        msg_len = len(msg.get("content", ""))
+        if total + msg_len > max_chars and result:
             break
+        total += msg_len
         result.insert(0, msg)
-    # Safety: always include at least the last message
     if not result and messages:
         result = [messages[-1]]
     return result
 
-# ── Shared generation options ─────────────────────────────────────────────────
-def _base_options(temperature: float) -> dict:
-    return {
-        "temperature": temperature,
-        "top_p": 0.95,
-        "top_k": 64,
-        "num_predict": DEFAULT_NUM_PREDICT,
-        "num_ctx": DEFAULT_NUM_CTX,
-        "num_batch": DEFAULT_NUM_BATCH,
-        "num_thread": NUM_THREADS,
-        "use_mmap": USE_MMAP,
-        "stop": ["Question:", "User:", "Asker:"],
-    }
-
 # ── AI Personality ────────────────────────────────────────────────────────────
 SYSTEM_PERSONALITY = os.getenv(
     "AI_PERSONALITY",
-    "Answer directly with specific facts, names, and examples. Do not repeat the question."
+    "You are Fynd AI, a product shopping assistant for the Fynd catalog.\n"
+    "STRICT RULES — follow every rule exactly, no exceptions:\n"
+    "1. Greetings/small talk (e.g. 'hi', 'thanks'): reply briefly WITHOUT calling any tools.\n"
+    "2. ANY product question: you MUST call search_products. Never skip this step.\n"
+    "3. Use ONLY data returned by tools. NEVER use your training knowledge about products, brands, specs, or prices.\n"
+    "4. If search_products returns found=false OR returns products that do not match the request: "
+    "respond EXACTLY with 'I don't have any products matching that in our catalog.' — nothing more.\n"
+    "5. NEVER mention, describe, or recommend any product not present in the tool result. "
+    "Do not name brands (Apple, Samsung, etc.) or models that were not returned by the tool.\n"
+    "6. Price filter: when user says 'under X' or 'below X', pass max_price=X to search_products. "
+    "Show ONLY products within that range.\n"
+    "7. Similar/recommended products: call get_recommendations with the product_id from the search result. "
+    "If no product_id is available, say you need a specific product first. "
+    "If same_category_found=false in the result, say 'No similar [category] in our catalog — here are related products you might like:' before listing them.\n"
+    "8. Format: list each product with name, price, and 2-3 key features. Be concise."
 )
 
-# ── App + Rate limiter ────────────────────────────────────────────────────────
-def get_client_key(request: Request) -> str:
-    forwarded_for = request.headers.get("x-forwarded-for")
-    if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    real_ip = request.headers.get("x-real-ip")
-    if real_ip:
-        return real_ip.strip()
-    return get_remote_address(request)
+def _resolve_temperature(value: float | None) -> float:
+    return DEFAULT_TEMPERATURE if value is None else value
+
+# ── OpenRouter helpers ────────────────────────────────────────────────────────
+def _headers() -> dict:
+    return {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "HTTP-Referer": APP_SITE_URL,
+        "X-Title": APP_TITLE,
+        "Content-Type": "application/json",
+    }
+
+# ── In-memory product vector store ───────────────────────────────────────────
+# Each entry: {id, title, text, embedding: list[float], metadata, source}
+_product_store: list[dict] = []
+# Secondary P-ID index: "P001" → UUID (assigned by load order from Boltic)
+_pid_index: dict[str, str] = {}
+
+def _boltic_headers() -> dict:
+    return {"x-boltic-token": BOLTIC_TOKEN, "Content-Type": "application/json"}
 
 
-limiter = Limiter(key_func=get_client_key, default_limits=[RATE_LIMIT])
+async def _boltic_fetch_all(table_id: str) -> list[dict]:
+    """
+    Fetch all records from a Boltic table using the POST /records/list endpoint.
+    Paginates automatically until all rows are retrieved.
+    """
+    url     = f"{BOLTIC_API_BASE}/{table_id}/records/list"
+    records: list[dict] = []
+    page_no = 1
+    while True:
+        try:
+            r = await _http_client.post(
+                url,
+                headers=_boltic_headers(),
+                json={
+                    "page": {"page_no": page_no, "page_size": BOLTIC_PAGE_SIZE},
+                    "sort": [{"field": "created_at", "direction": "asc"}],
+                },
+                timeout=30.0,
+            )
+            r.raise_for_status()
+            body  = r.json()
+            # Response shape: {data: [...records...]}
+            data  = body.get("data", [])
+            batch = data if isinstance(data, list) else (data.get("list") or data.get("records") or [])
+            if not batch:
+                break
+            records.extend(batch)
+            # Stop when fewer rows than page_size — we've hit the last page
+            if len(batch) < BOLTIC_PAGE_SIZE:
+                break
+            page_no += 1
+        except Exception as e:
+            logger.error("[boltic] fetch failed (table=%s page=%d): %s", table_id, page_no, e)
+            break
+    return records
 
 
+async def _load_from_boltic():
+    """
+    Load products + recommendations from Boltic tables into memory.
+    Falls back gracefully if tables are empty or unreachable.
+    """
+    global _product_store, _pid_index
+
+    logger.info("[boltic] Loading products from table %s …", BOLTIC_PRODUCTS_TABLE)
+    raw_products = await _boltic_fetch_all(BOLTIC_PRODUCTS_TABLE)
+
+    if not raw_products:
+        logger.warning("[boltic] Products table is empty or unreachable — knowledge base will be empty")
+        return
+
+    products = []
+    for row in raw_products:
+        emb = row.get("embedding")
+        # Boltic Vector column can return:
+        #   - list[float]  → native (already correct)
+        #   - str          → JSON array "[-0.1, 0.2, ...]" or CSV "-0.1,0.2,..."
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)          # handles "[-0.1, 0.2, ...]"
+            except Exception:
+                try:
+                    emb = [float(x) for x in emb.strip("[]").split(",") if x.strip()]
+                except Exception:
+                    emb = None
+        if not isinstance(emb, list) or not emb:
+            continue  # skip rows without a valid embedding
+
+        text_parts = [row.get("title", "")]
+        for field in ("brand", "category", "description", "features"):
+            val = row.get(field, "")
+            if val:
+                text_parts.append(str(val))
+
+        products.append({
+            "id":        row.get("id") or row.get("product_id", ""),
+            "title":     row.get("title", ""),
+            "text":      "\n".join(text_parts),
+            "embedding": emb,
+            "metadata": {
+                "brand":        row.get("brand", ""),
+                "category":     row.get("category", ""),
+                "price":        row.get("price", ""),
+                "rating":       row.get("rating", ""),
+                "features":     row.get("features", []),
+                "availability": row.get("availability", "In Stock"),
+            },
+            "source": "boltic",
+        })
+
+    _product_store = products
+    # Assign P-IDs based on load order (sorted by created_at asc from Boltic).
+    # This makes P001 == first product, P002 == second, etc. — matching the
+    # seeded recommendations table which was generated with the same ordering.
+    _pid_index = {f"P{str(i + 1).zfill(3)}": p["id"] for i, p in enumerate(products)}
+    logger.info("[boltic] Loaded %d products (P001–P%03d)", len(_product_store), len(_product_store))
+
+
+async def _boltic_create_product(record: dict) -> bool:
+    """Write a single product record to Boltic Products table."""
+    url = f"{BOLTIC_API_BASE}/{BOLTIC_PRODUCTS_TABLE}/records"
+    # id, created_at, updated_at are auto-generated by Boltic
+    auto_fields = {"id", "created_at", "updated_at"}
+    payload = {k: v for k, v in record.items() if k not in auto_fields}
+    try:
+        r = await _http_client.post(
+            url,
+            headers=_boltic_headers(),
+            json=payload,
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        body = r.json()
+        if body.get("error"):
+            logger.warning("[boltic] record rejected for %s: %s", record.get("title"), body["error"])
+            return False
+        return True
+    except Exception as e:
+        logger.warning("[boltic] failed to write product %s: %s", record.get("title"), e)
+        return False
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    dot    = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(x * x for x in b))
+    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+
+async def _embed(text: str) -> list[float]:
+    """Embed text using OpenRouter text-embedding-3-small."""
+    r = await _http_client.post(
+        EMBEDDINGS_URL,
+        headers=_headers(),
+        json={"model": EMBEDDINGS_MODEL, "input": text},
+    )
+    r.raise_for_status()
+    return r.json()["data"][0]["embedding"]
+
+def _parse_price(val) -> float | None:
+    """Normalize price strings like '$149.99', '₹249', '1,299' to float."""
+    if val is None:
+        return None
+    cleaned = re.sub(r'[^\d.]', '', str(val).strip())
+    try:
+        return float(cleaned) if cleaned else None
+    except ValueError:
+        return None
+
+
+def _vector_search(query_embedding: list[float], top_n: int | None = None) -> list[dict]:
+    """Cosine similarity search over in-memory product store."""
+    if not _product_store:
+        return []
+    n = top_n or RAG_TOP_K
+    scored = [
+        (_cosine_similarity(query_embedding, p["embedding"]), p)
+        for p in _product_store
+    ]
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [
+        p for score, p in scored[:n]
+        if score >= RAG_SIMILARITY_THRESHOLD
+    ]
+
+
+def _deduplicate(products: list[dict]) -> list[dict]:
+    """Remove duplicate products by normalized title (keep first occurrence)."""
+    seen, out = set(), []
+    for p in products:
+        key = re.sub(r'\s+', ' ', p["title"].lower().strip())
+        if key not in seen:
+            seen.add(key)
+            out.append(p)
+    return out
+
+def _keyword_search(query: str) -> list[dict]:
+    """
+    Keyword fallback — used when vector search returns no results.
+    Matches word stems against title + category + brand to handle plurals
+    and morphological variants (e.g. 'consoles' finds 'console',
+    'shoes' finds 'shoe'). Requires ALL query words to match so that
+    broad single-word hits (e.g. 'gaming' matching a mouse) don't appear.
+    """
+    # Strip trailing 's'/'es' for simple stemming
+    def stem(w: str) -> str:
+        if w.endswith("es") and len(w) > 4:
+            return w[:-2]
+        if w.endswith("s") and len(w) > 3:
+            return w[:-1]
+        return w
+
+    words = [stem(w) for w in query.lower().split() if len(w) > 2]
+    if not words:
+        return []
+
+    seen, results = set(), []
+    for p in _product_store:
+        meta       = p.get("metadata", {})
+        searchable = f"{p['title']} {meta.get('brand', '')} {meta.get('category', '')}".lower()
+        # ALL words must match (AND logic) to avoid off-topic single-word hits
+        if all(w in searchable for w in words) and p["id"] not in seen:
+            seen.add(p["id"])
+            results.append(p)
+        if len(results) >= RAG_TOP_K:
+            break
+    return results
+
+# ── Tool 1: Search knowledge base (RAG) ──────────────────────────────────────
+async def search_products(
+    query: str,
+    max_price: float | None = None,
+    min_price: float | None = None,
+    _precomputed_embedding: list[float] | None = None,  # injected by speculative embed
+) -> dict:
+    """
+    Search the product knowledge base using semantic similarity.
+    Supports optional price range filtering.
+    When price filter is active, scans the full catalog by price first,
+    then re-ranks by semantic relevance to the query.
+    _precomputed_embedding: skip the embed() call if already computed in parallel.
+    """
+    logger.info(f"[tool:search_products] query={query!r} max_price={max_price} min_price={min_price}")
+    try:
+        price_filter = max_price is not None or min_price is not None
+
+        if price_filter:
+            # Scan ALL products for price match — no similarity threshold applied
+            price_matched = []
+            for p in _product_store:
+                price = _parse_price(p.get("metadata", {}).get("price"))
+                if price is None:
+                    continue
+                if max_price is not None and price > max_price:
+                    continue
+                if min_price is not None and price < min_price:
+                    continue
+                price_matched.append(p)
+
+            # Re-rank by semantic similarity to the query (if any products found)
+            if price_matched and query.strip():
+                q_emb = _precomputed_embedding or await _embed(query)
+                scored = [
+                    (_cosine_similarity(q_emb, p["embedding"]), p)
+                    for p in price_matched
+                ]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                results = [p for _, p in scored]
+            else:
+                results = price_matched
+
+        else:
+            # Normal semantic search with threshold
+            q_emb = _precomputed_embedding or await _embed(query)
+            results = _vector_search(q_emb)
+
+            # Only fall back to keyword search when vector search returns nothing.
+            # Merging keyword results unconditionally caused off-topic products to
+            # appear (e.g. a gaming mouse showing up in "gaming console" results).
+            if not results:
+                logger.info("[tool:search_products] vector miss — trying keyword fallback")
+                results = _keyword_search(query)
+
+        # Deduplicate by title and cap
+        results = _deduplicate(results)[:RAG_TOP_K]
+
+        if results:
+            products = [
+                {
+                    "id":       p["id"],
+                    "title":    p["title"],
+                    "details":  p["text"],
+                    "metadata": p.get("metadata", {}),
+                    "source":   p.get("source", "knowledge_base"),
+                }
+                for p in results
+            ]
+            logger.info(f"[tool:search_products] found {len(products)} results")
+            return {"found": True, "products": products, "source": "knowledge_base"}
+
+        logger.info("[tool:search_products] no results found")
+        return {"found": False, "products": [], "source": "knowledge_base"}
+
+    except Exception as e:
+        logger.error(f"[tool:search_products] error: {e}")
+        return {"found": False, "error": str(e)}
+
+
+
+# ── Tool 2: RAG-based recommendations ────────────────────────────────────────
+async def get_recommendations(product_id: str) -> dict:
+    """
+    Find similar products by embedding similarity — RAG-powered.
+
+    Uses the target product's own embedding as the query vector and runs
+    cosine similarity against every other product in the store.
+    Works for any product in the catalog; no pre-computed table needed.
+    """
+    logger.info(f"[tool:get_recommendations] product_id={product_id!r}")
+
+    # Resolve UUID → P-ID or P-ID → UUID so we can find the product either way
+    resolved_uuid = _pid_index.get(product_id) or product_id
+    source_product = next((p for p in _product_store if p["id"] == resolved_uuid), None)
+
+    if not source_product or not source_product.get("embedding"):
+        logger.info(f"[tool:get_recommendations] product not found: {product_id!r}")
+        return {"found": False, "product_id": product_id, "recommendations": []}
+
+    query_embedding  = source_product["embedding"]
+    source_category  = source_product.get("metadata", {}).get("category", "").lower().strip()
+
+    # Score every other product by cosine similarity to the source product
+    scored = [
+        (_cosine_similarity(query_embedding, p["embedding"]), p)
+        for p in _product_store
+        if p["id"] != resolved_uuid and p.get("embedding")
+    ]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Prefer same-category products first, then fill with best cross-category.
+    # No minimum threshold — for recommendations the user always wants results;
+    # niche categories (e.g. only one gaming console) would return nothing otherwise.
+    same_cat  = [(s, p) for s, p in scored if p.get("metadata", {}).get("category", "").lower().strip() == source_category]
+    cross_cat = [(s, p) for s, p in scored if p.get("metadata", {}).get("category", "").lower().strip() != source_category]
+
+    # Fill up to RAG_TOP_K: same-category first, then cross-category
+    combined = same_cat[:RAG_TOP_K] + cross_cat[: max(0, RAG_TOP_K - len(same_cat))]
+    combined = combined[:RAG_TOP_K]
+
+    enriched = [
+        {
+            "product_id":    p["id"],
+            "title":         p["title"],
+            "score":         round(score, 4),
+            "rank":          rank,
+            "same_category": p.get("metadata", {}).get("category", "").lower().strip() == source_category,
+            "metadata":      p.get("metadata", {}),
+        }
+        for rank, (score, p) in enumerate(combined, start=1)
+    ]
+
+    has_same_cat = any(r["same_category"] for r in enriched)
+    logger.info(
+        f"[tool:get_recommendations] '{source_product['title']}' → "
+        f"{len(enriched)} products (same_category={has_same_cat})"
+    )
+    return {
+        "found":         True,
+        "product_id":    product_id,
+        "source_title":  source_product["title"],
+        "same_category_found": has_same_cat,
+        "recommendations":     enriched,
+    }
+
+
+# ── Tool definitions (sent to LLM) ───────────────────────────────────────────
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_products",
+            "description": (
+                "Search for products in the knowledge base using semantic similarity. "
+                "Supports optional price range filtering. "
+                "When the user specifies a price limit (e.g. 'under $50', 'below 500'), "
+                "always pass max_price. Returns matching products if found."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Natural language product search query, e.g. 'running shoes' or 'Samsung phones'",
+                    },
+                    "max_price": {
+                        "type": "number",
+                        "description": "Maximum price (numeric, no currency symbol). Use when user says 'under X', 'below X', 'less than X'.",
+                    },
+                    "min_price": {
+                        "type": "number",
+                        "description": "Minimum price (numeric). Use when user says 'above X', 'more than X'.",
+                    },
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_recommendations",
+            "description": (
+                "Get pre-computed product recommendations similar to a specific product. "
+                "Use this when the user asks for 'similar products', 'recommendations', "
+                "'what else should I buy', or 'show me more like this'. "
+                "Requires a product_id (e.g. 'P001'). Call search_products first if you "
+                "don't have the product_id yet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "product_id": {
+                        "type": "string",
+                        "description": "The product ID to get recommendations for, e.g. 'P001'",
+                    }
+                },
+                "required": ["product_id"],
+            },
+        },
+    },
+]
+
+TOOL_MAP = {
+    "search_products":     search_products,
+    "get_recommendations": get_recommendations,
+}
+
+# ── Lifespan ──────────────────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    # ── Startup ───────────────────────────────────────────────────────────────
-    global _http_client, _ollama_semaphore, _model_ready_lock
+    global _http_client
     _http_client = httpx.AsyncClient(
-        timeout=httpx.Timeout(connect=10.0, read=180.0, write=30.0, pool=5.0),
-        limits=httpx.Limits(
-            max_connections=OLLAMA_NUM_PARALLEL + 8,
-            max_keepalive_connections=OLLAMA_NUM_PARALLEL + 2,
-            keepalive_expiry=30,
-        ),
+        timeout=httpx.Timeout(connect=10.0, read=120.0, write=30.0, pool=5.0),
+        limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
-    _ollama_semaphore = asyncio.Semaphore(OLLAMA_NUM_PARALLEL)
-    _model_ready_lock = asyncio.Lock()
-    logger.info(
-        "HTTP client ready | parallel=%s | threads=%s | queue_limit=%s | queue_timeout=%ss",
-        OLLAMA_NUM_PARALLEL,
-        NUM_THREADS,
-        MAX_QUEUE_DEPTH,
-        QUEUE_TIMEOUT_SECONDS,
-    )
-    asyncio.create_task(_warmup_model())
+    if not OPENROUTER_API_KEY:
+        logger.warning("OPENROUTER_API_KEY is not set")
+    else:
+        logger.info("OpenRouter ready | chat=%s | embed=%s", MODEL, EMBEDDINGS_MODEL)
+    await _load_from_boltic()
     yield
-    # ── Shutdown ──────────────────────────────────────────────────────────────
     if _http_client:
         await _http_client.aclose()
 
 
 app = FastAPI(lifespan=lifespan)
-app.state.limiter = limiter
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
-# ── Shared resources ──────────────────────────────────────────────────────────
 _http_client: httpx.AsyncClient | None = None
-_ollama_semaphore: asyncio.Semaphore | None = None
-_model_ready_lock: asyncio.Lock | None = None
 
-# Tracks requests currently waiting for or holding a semaphore slot
-_active_requests: int = 0
-_running_requests: int = 0
-_waiting_requests: int = 0
-
-# Lightweight metrics
 _metrics: dict = {
-    "requests_total": 0,
-    "requests_blocked_safety": 0,
-    "requests_rate_limited": 0,
-    "requests_queue_timeouts": 0,
-    "requests_rejected_overload": 0,
-    "requests_client_cancelled": 0,
-    "avg_ttft_ms": 0.0,
-    "ttft_samples": 0,
-    "avg_queue_wait_ms": 0.0,
-    "queue_wait_samples": 0,
+    "requests_total":        0,
+    "tool_calls_rag":        0,
+    "tool_calls_recs":       0,
+    "tool_calls_direct":     0,
+    "requests_cancelled":    0,
+    "avg_ttft_ms":           0.0,
+    "ttft_samples":          0,
     "total_tokens_streamed": 0,
 }
 
-_model_ready_cache: dict = {"result": False, "expires": 0.0}
+_EMA_ALPHA = 0.1
 
-
-class ClientDisconnected(Exception):
-    """Raised when an SSE client disconnects before generation completes."""
-
-
-async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
-    _metrics["requests_rate_limited"] += 1
-    return _rate_limit_exceeded_handler(request, exc)
-
-
-app.add_exception_handler(RateLimitExceeded, rate_limit_handler)
-
-
-async def _warmup_model():
-    """Load model into RAM before the first user request."""
-    await asyncio.sleep(5)
-    for attempt in range(20):
-        try:
-            r = await _http_client.post(
-                f"{OLLAMA_URL}/api/chat",
-                json={
-                    "model": MODEL,
-                    "messages": [{"role": "user", "content": "hi"}],
-                    "stream": False,
-                    "keep_alive": KEEP_ALIVE,
-                    "options": {
-                        "num_predict": 1,
-                        "num_ctx": 512,
-                        "num_batch": 16,
-                        "num_thread": NUM_THREADS,
-                        "use_mmap": USE_MMAP,
-                    },
-                },
-            )
-            if r.status_code == 200:
-                _set_model_ready(True, ttl_seconds=30.0)
-                logger.info("Model loaded into RAM and ready.")
-                return
-        except Exception as e:
-            logger.info(f"Warmup attempt {attempt + 1}/20: {e}")
-        await asyncio.sleep(10)
-    logger.warning("Model warmup timed out — will load on first request")
+def _update_ttft(ms: float):
+    if _metrics["ttft_samples"] == 0:
+        _metrics["avg_ttft_ms"] = ms
+    else:
+        _metrics["avg_ttft_ms"] = _EMA_ALPHA * ms + (1 - _EMA_ALPHA) * _metrics["avg_ttft_ms"]
+    _metrics["ttft_samples"] += 1
 
 
 # ── Validation error handler ──────────────────────────────────────────────────
@@ -538,21 +610,21 @@ async def validation_exception_handler(_request: Request, exc: RequestValidation
 
 # ── Request models ────────────────────────────────────────────────────────────
 class ChatMessage(BaseModel):
-    role: str     # "user" | "assistant"
+    role: str
     content: str
 
 
 class AskIn(BaseModel):
-    messages: list[ChatMessage]
+    messages:    list[ChatMessage]
     temperature: float | None = DEFAULT_TEMPERATURE
-    personality: str | None = None
+    personality: str | None   = None
+    use_tools:   bool          = True   # set False to skip tool calling
 
     @field_validator('messages')
     @classmethod
-    def validate_messages(cls, v: list[ChatMessage]) -> list[ChatMessage]:
+    def validate_messages(cls, v):
         if not v:
             raise ValueError("Messages cannot be empty")
-        # Validate only the latest user message (previous ones were validated at send time)
         last_user = next((m for m in reversed(v) if m.role == 'user'), None)
         if last_user:
             validate_input(last_user.content)
@@ -560,344 +632,480 @@ class AskIn(BaseModel):
 
 
 class GenerateIn(BaseModel):
-    prompt: str
+    prompt:      str
     temperature: float | None = DEFAULT_TEMPERATURE
 
     @field_validator('prompt')
     @classmethod
-    def validate_prompt(cls, v: str) -> str:
+    def validate_prompt(cls, v):
         return validate_input(v)
 
 
-def _set_model_ready(result: bool, ttl_seconds: float = MODEL_READY_TTL_SECONDS):
-    _model_ready_cache["result"] = result
-    _model_ready_cache["expires"] = time.monotonic() + ttl_seconds
+class DocumentIn(BaseModel):
+    text:  str
+    title: str | None = None
+
+    @field_validator('text')
+    @classmethod
+    def validate_text(cls, v):
+        if not v or not v.strip():
+            raise ValueError("Document text cannot be empty")
+        if len(v) > 10_000:
+            raise ValueError("Document too long. Max 10,000 characters")
+        return v.strip()
 
 
-async def _is_model_ready(force: bool = False) -> bool:
-    if _http_client is None:
-        return False
-
-    now = time.monotonic()
-    if not force and now < _model_ready_cache["expires"]:
-        return _model_ready_cache["result"]
-
-    if _model_ready_lock is None:
-        return _model_ready_cache["result"]
-
-    async with _model_ready_lock:
-        now = time.monotonic()
-        if not force and now < _model_ready_cache["expires"]:
-            return _model_ready_cache["result"]
-
-        result = False
-        try:
-            r = await _http_client.get(f"{OLLAMA_URL}/api/tags", timeout=1.0)
-            if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    if m.get("name") == MODEL or m.get("name", "").startswith(MODEL):
-                        result = True
-                        break
-        except httpx.HTTPError:
-            result = False
-
-        _set_model_ready(result)
-        return result
-
-
-_EMA_ALPHA = 0.1  # weight given to the latest sample (higher = more reactive)
-
-
-def _update_ema(avg_key: str, samples_key: str, value: float):
-    """Exponential moving average — stays responsive to recent changes."""
-    if _metrics[samples_key] == 0:
-        _metrics[avg_key] = value
-    else:
-        _metrics[avg_key] = _EMA_ALPHA * value + (1 - _EMA_ALPHA) * _metrics[avg_key]
-    _metrics[samples_key] += 1
-
-
-def _update_ttft(ttft_ms: float):
-    _update_ema("avg_ttft_ms", "ttft_samples", ttft_ms)
-
-
-def _update_queue_wait(wait_ms: float):
-    _update_ema("avg_queue_wait_ms", "queue_wait_samples", wait_ms)
-
-
-def _resolve_temperature(value: float | None) -> float:
-    return DEFAULT_TEMPERATURE if value is None else value
-
-
-@asynccontextmanager
-async def _ollama_slot(request: Request | None = None):
-    global _active_requests, _running_requests, _waiting_requests
-
-    if _ollama_semaphore is None:
-        raise HTTPException(503, detail="Model service unavailable.")
-    if _waiting_requests >= MAX_QUEUE_DEPTH:
-        _metrics["requests_rejected_overload"] += 1
-        raise HTTPException(429, detail="Server is busy. Too many requests are queued.")
-
-    acquired = False
-    wait_started = time.monotonic()
-    _active_requests += 1
-    _waiting_requests += 1
-
-    try:
-        remaining = QUEUE_TIMEOUT_SECONDS
-        while remaining > 0:
-            if request is not None and await request.is_disconnected():
-                _metrics["requests_client_cancelled"] += 1
-                raise ClientDisconnected()
-
-            step_started = time.monotonic()
-            try:
-                await asyncio.wait_for(
-                    _ollama_semaphore.acquire(),
-                    timeout=min(1.0, remaining),
-                )
-                acquired = True
-                break
-            except asyncio.TimeoutError:
-                remaining -= time.monotonic() - step_started
-
-        if not acquired:
-            _metrics["requests_queue_timeouts"] += 1
-            raise HTTPException(503, detail="Server is busy. Please retry in a few seconds.")
-
-        _waiting_requests -= 1
-        _running_requests += 1
-        queue_wait_ms = (time.monotonic() - wait_started) * 1000
-        _update_queue_wait(queue_wait_ms)
-        yield round(queue_wait_ms)
-    finally:
-        if acquired:
-            _running_requests -= 1
-            _ollama_semaphore.release()
-        else:
-            _waiting_requests -= 1
-        _active_requests -= 1
-
-
-# ── Health / Readiness / Queue / Metrics ─────────────────────────────────────
+# ── Health / Metrics ──────────────────────────────────────────────────────────
 @app.get("/health")
 async def health():
-    return {"ok": True, "model": MODEL, "model_ready": await _is_model_ready()}
-
-
-@app.get("/ready")
-async def ready():
-    return {"ready": await _is_model_ready(), "model": MODEL}
-
-
-@app.get("/queue")
-def queue_status():
-    """How many requests are currently waiting for an Ollama slot."""
     return {
-        "active": _active_requests,
-        "running": _running_requests,
-        "capacity": OLLAMA_NUM_PARALLEL,
-        "queued": _waiting_requests,
-        "queue_limit": MAX_QUEUE_DEPTH,
+        "ok":          bool(OPENROUTER_API_KEY),
+        "model":       MODEL,
+        "embed_model": EMBEDDINGS_MODEL,
+        "provider":    "openrouter",
+        "model_ready": bool(OPENROUTER_API_KEY),
+        "kb_size":     len(_product_store),
     }
 
 
 @app.get("/metrics")
 async def metrics():
+    return {**_metrics, "model": MODEL, "kb_size": len(_product_store)}
+
+
+# ── Knowledge base CRUD ───────────────────────────────────────────────────────
+@app.post("/documents")
+async def add_document(payload: DocumentIn):
+    """Manually add a product/document to the knowledge base."""
+    doc_id    = uuid.uuid4().hex
+    embedding = await _embed(payload.text)
+    doc = {
+        "id":         doc_id,
+        "title":      payload.title or f"Document {len(_product_store) + 1}",
+        "text":       payload.text,
+        "embedding":  embedding,
+        "metadata":   {},
+        "source":     "manual",
+        "created_at": int(time.time()),
+    }
+    _product_store.append(doc)
+    logger.info(f"[kb] manual add: {doc['title']}")
     return {
-        **_metrics,
-        "model": MODEL,
-        "model_ready": await _is_model_ready(),
-        "running": _running_requests,
-        "queued": _waiting_requests,
-        "capacity": OLLAMA_NUM_PARALLEL,
-        "queue_limit": MAX_QUEUE_DEPTH,
+        "id":      doc_id,
+        "title":   doc["title"],
+        "snippet": payload.text[:120] + ("…" if len(payload.text) > 120 else ""),
     }
 
 
-# ── /generate (raw prompt, non-streaming) ────────────────────────────────────
-@app.post("/generate")
-@limiter.limit(RATE_LIMIT)
-async def generate(request: Request, payload: GenerateIn):  # noqa: ARG001 — slowapi needs `request`
-    req_id = uuid.uuid4().hex[:8]
-    logger.info(f"[{req_id}] Generate: {payload.prompt[:50]}...")
-    _metrics["requests_total"] += 1
+@app.get("/documents")
+async def list_documents():
+    return [
+        {
+            "id":         d["id"],
+            "title":      d["title"],
+            "snippet":    d["text"][:120] + ("…" if len(d["text"]) > 120 else ""),
+            "source":     d.get("source", "manual"),
+            "created_at": d.get("created_at"),
+        }
+        for d in _product_store
+    ]
 
-    if not await _is_model_ready():
-        raise HTTPException(503, detail=f"Model '{MODEL}' is still loading.")
 
-    body = {
-        "model": MODEL,
-        "messages": [{"role": "user", "content": payload.prompt}],
-        "stream": False,
-        "keep_alive": KEEP_ALIVE,
-        "options": _base_options(_resolve_temperature(payload.temperature)),
-    }
+@app.delete("/documents/{doc_id}")
+async def delete_document(doc_id: str):
+    global _product_store
+    before = len(_product_store)
+    _product_store = [d for d in _product_store if d["id"] != doc_id]
+    if len(_product_store) == before:
+        raise HTTPException(404, detail="Document not found")
+    return {"ok": True}
 
-    max_retries, retry_delay = 3, 2
-    for attempt in range(max_retries):
-        try:
-            async with _ollama_slot() as queue_wait_ms:
-                r = await _http_client.post(f"{OLLAMA_URL}/api/chat", json=body)
-                r.raise_for_status()
-                _set_model_ready(True)
-                data = r.json()
-                response_text = clean_llm_text(
-                    data.get("message", {}).get("content", "").strip()
-                )
-                is_safe, validated_text, _ = validate_output(response_text)
-                if not is_safe:
-                    _metrics["requests_blocked_safety"] += 1
-                    response_text = validated_text
-                return {
-                    "response": response_text or "I couldn't generate a proper response.",
-                    "model": MODEL,
-                    "queue_wait_ms": queue_wait_ms,
+
+# ── File upload → embed → knowledge base ─────────────────────────────────────
+def _parse_upload(content: bytes, filename: str) -> list[dict]:
+    """Parse CSV or Excel file and return list of row dicts."""
+    ext = Path(filename).suffix.lower()
+
+    if ext in (".xlsx", ".xls"):
+        import openpyxl
+        wb  = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        ws  = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if not rows:
+            return []
+        headers = [str(h).strip().lower() if h else "" for h in rows[0]]
+        return [
+            {headers[i]: (str(v).strip() if v is not None else "") for i, v in enumerate(row)}
+            for row in rows[1:]
+            if any(v is not None for v in row)
+        ]
+    else:
+        text    = content.decode("utf-8-sig", errors="replace")
+        reader  = csv.DictReader(io.StringIO(text))
+        return [{k.strip().lower(): (v.strip() if v else "") for k, v in row.items()} for row in reader]
+
+
+def _row_to_product_text(row: dict) -> tuple[str, str]:
+    """Convert a row dict to (title, full_text) for embedding."""
+    title    = row.get("title") or row.get("name") or row.get("product") or "Unknown Product"
+    brand    = row.get("brand") or row.get("manufacturer") or ""
+    category = row.get("category") or row.get("type") or ""
+    price    = row.get("price") or ""
+    rating   = row.get("rating") or ""
+    desc     = row.get("description") or row.get("desc") or row.get("details") or ""
+    features = row.get("features") or row.get("specs") or ""
+
+    parts = [f"{title}"]
+    if brand:    parts.append(f"by {brand}")
+    if category: parts.append(f"Category: {category}")
+    if price:    parts.append(f"Price: {price}")
+    if rating:   parts.append(f"Rating: {rating}/5")
+    if desc:     parts.append(desc)
+    if features: parts.append(f"Features: {features}")
+
+    return title, "\n".join(parts)
+
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Upload a CSV or Excel file of products.
+    Each row is embedded and added to the knowledge base.
+    Returns a streaming JSON-lines response so the client can show progress.
+    """
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(503, detail="OpenRouter API key not configured.")
+
+    allowed = {".csv", ".xlsx", ".xls"}
+    ext     = Path(file.filename or "").suffix.lower()
+    if ext not in allowed:
+        raise HTTPException(400, detail=f"Unsupported file type '{ext}'. Upload a CSV or Excel file.")
+
+    content = await file.read()
+    if len(content) > 5 * 1024 * 1024:
+        raise HTTPException(400, detail="File too large. Max 5 MB.")
+
+    try:
+        rows = _parse_upload(content, file.filename)
+    except Exception as e:
+        raise HTTPException(400, detail=f"Could not parse file: {e}")
+
+    if not rows:
+        raise HTTPException(400, detail="File is empty or has no data rows.")
+    if len(rows) > 500:
+        raise HTTPException(400, detail="Too many rows. Max 500 per upload.")
+
+    async def stream_progress():
+        added, skipped = 0, 0
+        total = len(rows)
+
+        yield json.dumps({"status": "started", "total": total}) + "\n"
+
+        for i, row in enumerate(rows):
+            title, text = _row_to_product_text(row)
+            if not text.strip():
+                skipped += 1
+                continue
+            try:
+                embedding = await _embed(text)
+                doc = {
+                    "id":         uuid.uuid4().hex,
+                    "title":      title,
+                    "text":       text,
+                    "embedding":  embedding,
+                    "metadata":   {
+                        "brand":    row.get("brand", ""),
+                        "category": row.get("category", ""),
+                        "price":    row.get("price", ""),
+                        "rating":   row.get("rating", ""),
+                        "features": row.get("features", "").split(";"),
+                        "availability": row.get("availability", "In Stock"),
+                    },
+                    "source":     "upload",
+                    "created_at": int(time.time()),
                 }
-        except HTTPException:
-            raise
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Ollama HTTP error (attempt {attempt+1}): {e.response.status_code}")
-            if attempt < max_retries - 1 and e.response.status_code == 500:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(503, detail="Model service temporarily unavailable.")
-        except httpx.RequestError as e:
-            logger.error(f"[{req_id}] Ollama connection error (attempt {attempt+1}): {e}")
-            _set_model_ready(False, ttl_seconds=1.0)
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(503, detail="Cannot connect to model service.")
-        except Exception as e:
-            logger.error(f"[{req_id}] Unexpected error (attempt {attempt+1}): {e}")
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                continue
-            raise HTTPException(500, detail="An unexpected error occurred.")
+                _product_store.append(doc)
+
+                # Write to Boltic (non-blocking — failure doesn't abort the upload)
+                boltic_record = {
+                    "id":           doc["id"],
+                    "title":        title,
+                    "brand":        row.get("brand", ""),
+                    "category":     row.get("category", ""),
+                    "price":        row.get("price", ""),
+                    "rating":       row.get("rating", ""),
+                    "description":  row.get("description") or row.get("desc") or "",
+                    "features":     row.get("features", ""),
+                    "availability": row.get("availability", "In Stock"),
+                    "embedding":    embedding,
+                    "created_at":   doc["created_at"],
+                }
+                await _boltic_create_product(boltic_record)
+
+                added += 1
+                yield json.dumps({"status": "progress", "done": i + 1, "total": total, "title": title}) + "\n"
+            except Exception as e:
+                skipped += 1
+                logger.warning(f"[upload] failed to embed row {i}: {e}")
+                yield json.dumps({"status": "progress", "done": i + 1, "total": total, "title": title, "error": str(e)}) + "\n"
+
+        yield json.dumps({"status": "done", "added": added, "skipped": skipped, "total": total}) + "\n"
+
+    return StreamingResponse(stream_progress(), media_type="application/x-ndjson")
 
 
-# ── /ask/stream — primary endpoint (SSE, multi-turn) ─────────────────────────
+# ── /ask/stream — tool-calling RAG pipeline ───────────────────────────────────
 @app.post("/ask/stream")
-@limiter.limit(RATE_LIMIT)
 async def ask_stream(request: Request, payload: AskIn):
     """
-    Multi-turn streaming chat via Ollama /api/chat.
-    Sends the full conversation history so the model has context.
-    Returns Server-Sent Events:
-      {"type": "token",   "content": "..."}
-      {"type": "done",    "ttft_ms": 123}
-      {"type": "blocked", "refusal": "..."}
-      {"type": "error",   "message": "..."}
+    Multi-turn streaming chat with tool calling.
+
+    Flow:
+      1. Send message + tools to LLM (non-streaming, fast ~200ms)
+      2. If LLM calls search_products → search local KB
+         If LLM calls fetch_from_fynd  → call Fynd API (+ auto-cache result)
+         If LLM answers directly       → skip tools
+      3. Stream final answer back to client
+
+    SSE events:
+      {"type": "tool_call",  "tool": "search_products", "query": "..."}
+      {"type": "tool_result","tool": "search_products", "found": true}
+      {"type": "token",      "content": "..."}
+      {"type": "done",       "ttft_ms": 123}
+      {"type": "error",      "message": "..."}
     """
     req_id = uuid.uuid4().hex[:8]
-    logger.info(f"[{req_id}] Stream: {len(payload.messages)} messages in history")
+    logger.info(f"[{req_id}] Stream: {len(payload.messages)} msgs | tools={payload.use_tools}")
     _metrics["requests_total"] += 1
 
-    if not await _is_model_ready():
-        raise HTTPException(503, detail=f"Model '{MODEL}' is still loading.")
+    if not OPENROUTER_API_KEY:
+        async def no_key():
+            yield f"data: {json.dumps({'type': 'error', 'message': 'OpenRouter API key not configured.'})}\n\n"
+        return StreamingResponse(no_key(), media_type="text/event-stream")
 
     personality = payload.personality or SYSTEM_PERSONALITY
-    if len(personality) > 500:
-        personality = personality[:500].rsplit('.', 1)[0] + '.'
-
-    # Build messages for /api/chat: system prompt + trimmed history
-    history = trim_to_context([{"role": m.role, "content": m.content} for m in payload.messages])
-    chat_messages = [{"role": "system", "content": personality}] + history
-
-    body = {
-        "model": MODEL,
-        "messages": chat_messages,
-        "stream": True,
-        "keep_alive": KEEP_ALIVE,
-        "options": _base_options(_resolve_temperature(payload.temperature)),
-    }
+    history     = trim_to_context([{"role": m.role, "content": m.content} for m in payload.messages])
+    messages    = [{"role": "system", "content": personality}] + history
+    temperature = _resolve_temperature(payload.temperature)
 
     async def event_stream():
-        full_text  = ""
         request_start = time.monotonic()
-        first_token_received = False
-        max_retries, retry_delay = 3, 5
 
         try:
-            for attempt in range(max_retries):
-                try:
-                    async with _ollama_slot(request) as queue_wait_ms:
-                        async with _http_client.stream("POST", f"{OLLAMA_URL}/api/chat", json=body) as r:
-                            r.raise_for_status()
-                            _set_model_ready(True)
-                            async for line in r.aiter_lines():
-                                if await request.is_disconnected():
-                                    _metrics["requests_client_cancelled"] += 1
-                                    logger.info(f"[{req_id}] Stream client disconnected during generation")
-                                    return
-                                if not line.strip():
-                                    continue
-                                try:
-                                    chunk = json.loads(line)
-                                except json.JSONDecodeError:
-                                    continue
+            # ── Turn 1: tool decision (non-streaming, fast) ───────────────────
+            tool_messages = list(messages)  # copy
 
-                                token = chunk.get("message", {}).get("content", "")
-                                done  = chunk.get("done", False)
+            # Speculative embedding: start embedding the user's last message NOW,
+            # in parallel with the Turn-1 tool-decision call. If the LLM decides
+            # to call search_products the embedding is already done — saving one
+            # sequential round-trip (~200–400 ms). Discarded if not needed.
+            last_user_content = next(
+                (m["content"] for m in reversed(tool_messages) if m["role"] == "user"), ""
+            )
+            speculative_embed_task: asyncio.Task | None = None
+            if payload.use_tools and last_user_content:
+                speculative_embed_task = asyncio.create_task(_embed(last_user_content))
 
-                                if token:
-                                    if not first_token_received:
-                                        first_token_received = True
-                                        ttft_ms = (time.monotonic() - request_start) * 1000
-                                        _update_ttft(ttft_ms)
+            # Small random jitter to spread concurrent requests on OpenRouter
+            await asyncio.sleep(0.005 + 0.015 * (hash(req_id) % 10) / 10)
 
-                                    full_text += token
-                                    _metrics["total_tokens_streamed"] += 1
-                                    yield f"data: {json.dumps({'type': 'token', 'content': token})}\n\n"
+            if payload.use_tools:
+                # Multi-round tool loop — allows search → recommend in sequence
+                for _round in range(3):  # max 3 rounds to prevent infinite loops
+                    r1 = await _http_client.post(
+                        OPENROUTER_URL,
+                        headers=_headers(),
+                        json={
+                            "model":       MODEL,
+                            "messages":    tool_messages,
+                            "tools":       TOOLS,
+                            "tool_choice": "auto",
+                            "temperature": temperature,
+                            "max_tokens":  128,  # tool call JSON ≈ 50 tokens; 128 is plenty
+                            "stream":      False,
+                        },
+                    )
+                    if r1.status_code == 401:
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid API key.'})}\n\n"
+                        return
+                    if r1.status_code == 429:
+                        # Retry once after a short back-off before giving up
+                        if _round == 0:
+                            logger.warning(f"[{req_id}] Turn-1 rate limited — retrying in 2s")
+                            await asyncio.sleep(2)
+                            continue
+                        yield f"data: {json.dumps({'type': 'error', 'message': 'Rate limit exceeded. Please try again in a moment.'})}\n\n"
+                        return
+                    if r1.status_code != 200:
+                        try:
+                            err_body = r1.json()
+                            err_msg  = err_body.get("error", {}).get("message") or f"Model error ({r1.status_code})."
+                        except Exception:
+                            err_msg  = f"Model error ({r1.status_code})."
+                        logger.error(f"[{req_id}] Turn-1 error {r1.status_code}: {err_msg}")
+                        yield f"data: {json.dumps({'type': 'error', 'message': err_msg})}\n\n"
+                        return
+                    choice = r1.json()["choices"][0]
 
-                                if done:
-                                    is_safe, _, category = validate_output(full_text)
-                                    if not is_safe:
-                                        _metrics["requests_blocked_safety"] += 1
-                                        refusal = REFUSAL_TEMPLATES.get(category, REFUSAL_TEMPLATES['default'])
-                                        logger.error(f"[{req_id}] Stream output blocked [{category}]")
-                                        yield f"data: {json.dumps({'type': 'blocked', 'refusal': refusal})}\n\n"
-                                    else:
-                                        ttft_ms = round((time.monotonic() - request_start) * 1000)
-                                        yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms, 'queue_wait_ms': queue_wait_ms})}\n\n"
-                                    return
-                    return  # success, exit retry loop
-                except ClientDisconnected:
-                    logger.info("Stream client disconnected while waiting for a model slot")
+                    if choice.get("finish_reason") != "tool_calls":
+                        if _round == 0:
+                            _metrics["tool_calls_direct"] += 1
+                        break  # LLM is done calling tools — proceed to stream
+
+                    tool_calls = choice["message"].get("tool_calls", [])
+                    tool_messages.append(choice["message"])
+
+                    for tc in tool_calls:
+                        fn_name = tc["function"]["name"]
+                        fn_args = json.loads(tc["function"]["arguments"])
+                        arg     = fn_args.get("product_id") or fn_args.get("query", "")
+
+                        logger.info(f"[{req_id}] tool call (round {_round+1}): {fn_name}({arg!r})")
+                        yield f"data: {json.dumps({'type': 'tool_call', 'tool': fn_name, 'query': arg})}\n\n"
+
+                        # Inject the speculative embedding on the first search_products call
+                        # so it doesn't need to make another embed API call.
+                        if fn_name == "search_products" and speculative_embed_task is not None:
+                            try:
+                                precomputed = await speculative_embed_task
+                                speculative_embed_task = None  # consume once
+                                fn_args["_precomputed_embedding"] = precomputed
+                                logger.info(f"[{req_id}] speculative embed hit — skipped embed round-trip")
+                            except Exception as e:
+                                logger.warning(f"[{req_id}] speculative embed failed: {e}")
+                                speculative_embed_task = None
+
+                        result = await TOOL_MAP[fn_name](**fn_args) if fn_name in TOOL_MAP else {"error": f"Unknown tool: {fn_name}"}
+
+                        if fn_name == "search_products":
+                            _metrics["tool_calls_rag"] += 1
+                        elif fn_name == "get_recommendations":
+                            _metrics["tool_calls_recs"] += 1
+
+                        yield f"data: {json.dumps({'type': 'tool_result', 'tool': fn_name, 'found': result.get('found', False)})}\n\n"
+
+                        tool_messages.append({
+                            "role":         "tool",
+                            "tool_call_id": tc["id"],
+                            "content":      json.dumps(result),
+                        })
+            else:
+                _metrics["tool_calls_direct"] += 1
+                tool_messages = messages
+                # No tool was called — cancel the speculative embed to avoid wasting the call
+                if speculative_embed_task is not None and not speculative_embed_task.done():
+                    speculative_embed_task.cancel()
+
+            # ── Turn 2: stream final answer ───────────────────────────────────
+            first_token = True
+
+            async with _http_client.stream(
+                "POST", OPENROUTER_URL,
+                headers=_headers(),
+                json={
+                    "model":       MODEL,
+                    "messages":    tool_messages,
+                    "temperature": temperature,
+                    "max_tokens":  DEFAULT_MAX_TOKENS,
+                    "stream":      True,
+                },
+            ) as r2:
+                if r2.status_code == 401:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Invalid API key.'})}\n\n"
                     return
-                except HTTPException as e:
-                    yield f"data: {json.dumps({'type': 'error', 'message': e.detail})}\n\n"
+                if r2.status_code == 429:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'Rate limit exceeded.'})}\n\n"
                     return
-                except httpx.HTTPStatusError as e:
-                    logger.error(f"Stream HTTP error (attempt {attempt+1}): {e.response.status_code}")
-                    if attempt < max_retries - 1 and e.response.status_code in (500, 503):
-                        await asyncio.sleep(retry_delay)
+                if r2.status_code != 200:
+                    yield f"data: {json.dumps({'type': 'error', 'message': f'Model error ({r2.status_code}).'})}\n\n"
+                    return
+
+                async for line in r2.aiter_lines():
+                    if await request.is_disconnected():
+                        _metrics["requests_cancelled"] += 1
+                        return
+
+                    if not line.startswith("data: "):
                         continue
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Model service temporarily unavailable.'})}\n\n"
-                    return
-                except httpx.RequestError as e:
-                    logger.error(f"Stream connection error (attempt {attempt+1}): {e}")
-                    _set_model_ready(False, ttl_seconds=1.0)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
+                    raw = line[6:].strip()
+                    if raw == "[DONE]":
+                        break
+
+                    try:
+                        chunk = json.loads(raw)
+                    except json.JSONDecodeError:
                         continue
-                    yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to model service.'})}\n\n"
-                    return
+
+                    delta   = chunk.get("choices", [{}])[0].get("delta", {})
+                    content = delta.get("content", "")
+                    finish  = chunk.get("choices", [{}])[0].get("finish_reason")
+
+                    if content:
+                        if first_token:
+                            first_token = False
+                            _update_ttft((time.monotonic() - request_start) * 1000)
+                        _metrics["total_tokens_streamed"] += 1
+                        yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
+
+                    if finish:
+                        ttft_ms = round((time.monotonic() - request_start) * 1000)
+                        yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms})}\n\n"
+                        return
+
+            ttft_ms = round((time.monotonic() - request_start) * 1000)
+            yield f"data: {json.dumps({'type': 'done', 'ttft_ms': ttft_ms})}\n\n"
+
+        except httpx.RequestError as e:
+            logger.error(f"[{req_id}] connection error: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'Cannot connect to model service.'})}\n\n"
         except Exception as e:
-            logger.error(f"Stream unexpected error: {e}")
+            logger.error(f"[{req_id}] unexpected error: {e}")
             yield f"data: {json.dumps({'type': 'error', 'message': 'An unexpected error occurred.'})}\n\n"
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
+            "Cache-Control":    "no-cache",
             "X-Accel-Buffering": "no",
-            "Connection": "keep-alive",
+            "Connection":       "keep-alive",
         },
     )
+
+
+# ── /generate (non-streaming, no tools) ──────────────────────────────────────
+@app.post("/generate")
+async def generate(payload: GenerateIn):
+    req_id = uuid.uuid4().hex[:8]
+    _metrics["requests_total"] += 1
+
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(503, detail="OpenRouter API key not configured.")
+
+    try:
+        r = await _http_client.post(
+            OPENROUTER_URL,
+            headers=_headers(),
+            json={
+                "model":       MODEL,
+                "messages":    [{"role": "user", "content": payload.prompt}],
+                "temperature": _resolve_temperature(payload.temperature),
+                "max_tokens":  DEFAULT_MAX_TOKENS,
+                "stream":      False,
+            },
+        )
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        return {"response": text or "No response.", "model": MODEL}
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 401:
+            raise HTTPException(503, detail="Invalid API key.")
+        if e.response.status_code == 429:
+            raise HTTPException(429, detail="Rate limit exceeded.")
+        raise HTTPException(503, detail="Model service temporarily unavailable.")
+    except httpx.RequestError as e:
+        logger.error(f"[{req_id}] connection error: {e}")
+        raise HTTPException(503, detail="Cannot connect to model service.")
 
 
 # ── Static frontend ───────────────────────────────────────────────────────────

@@ -19,13 +19,6 @@ const PERSONALITIES = {
     professional: 'You are a professional assistant. Give structured, concise answers.',
 }
 
-// ── Suggested prompts ─────────────────────────────────────────────────────────
-const SUGGESTED_PROMPTS = [
-    { icon: '⚡', label: 'Explain', text: 'Explain how transformers work in AI, simply' },
-    { icon: '🛠', label: 'Code',    text: 'Write a Python script that reads a CSV and sorts it by date' },
-    { icon: '✍️', label: 'Write',   text: 'Draft a concise email to reschedule a client meeting' },
-    { icon: '🧠', label: 'Compare', text: 'What are the key differences between REST and GraphQL?' },
-]
 
 // ── Icons ─────────────────────────────────────────────────────────────────────
 const PlusIcon = () => (
@@ -103,9 +96,9 @@ const RetryIcon = () => (
         <polyline points="1 4 1 10 7 10" /><path d="M3.51 15a9 9 0 1 0 .49-3.96" />
     </svg>
 )
-const RegenIcon = () => (
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-        <path d="M23 4v6h-6" /><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+const AttachIcon = () => (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
     </svg>
 )
 const ExportIcon = () => (
@@ -183,11 +176,15 @@ function CodeBlock({ inline, className, children, ...props }) {
         <div className="code-block">
             <div className="code-block__header">
                 <span className="code-block__lang">{lang}</span>
-                <button className="code-block__copy" onClick={() => {
-                    navigator.clipboard.writeText(code)
-                    setCopied(true)
-                    setTimeout(() => setCopied(false), 2000)
-                }}>
+                <button
+                    className="code-block__copy"
+                    aria-label={copied ? 'Copied to clipboard' : 'Copy code'}
+                    onClick={() => {
+                        navigator.clipboard.writeText(code)
+                        setCopied(true)
+                        setTimeout(() => setCopied(false), 2000)
+                    }}
+                >
                     {copied ? <><CheckIcon /> Copied</> : <><CopyIcon /> Copy</>}
                 </button>
             </div>
@@ -206,13 +203,66 @@ const MD_COMPONENTS = {
     ),
 }
 
+// ── Suggested prompts ─────────────────────────────────────────────────────────
+const SUGGESTED_PROMPTS = [
+    { label: 'Browse shoes',       text: 'Show me the best running shoes available' },
+    { label: 'Budget electronics', text: 'Show me headphones under ₹2000'           },
+    { label: 'Top rated',          text: 'What are the highest rated products?'      },
+    { label: 'Recommendations',    text: 'Recommend something for a home workout'    },
+]
+
+function SuggestedPrompts({ onSelect }) {
+    return (
+        <div className="suggested-prompts">
+            {SUGGESTED_PROMPTS.map((p) => (
+                <button key={p.label} className="prompt-card" onClick={() => onSelect(p.text)}>
+                    <span className="prompt-card__label">{p.label}</span>
+                    <span className="prompt-card__text">{p.text}</span>
+                </button>
+            ))}
+        </div>
+    )
+}
+
 // ── Typing indicator ──────────────────────────────────────────────────────────
 function TypingDots() {
-    return <span className="typing-dots"><span /><span /><span /></span>
+    return <span className="typing-dots" aria-hidden="true"><span /><span /><span /></span>
 }
 
 // ── Message ───────────────────────────────────────────────────────────────────
-function Message({ msg, onRetry, onRegenerate }) {
+const TOOL_META = {
+    search_products:    { label: 'Searching catalog',       icon: '🔍' },
+    get_recommendations:{ label: 'Finding similar products', icon: '✦'  },
+    fetch_from_fynd:    { label: 'Fetching from Fynd',      icon: '🛒' },
+}
+
+function ToolPills({ toolCalls }) {
+    if (!toolCalls?.length) return null
+    return (
+        <div className="tool-pills" aria-label="Tool activity">
+            {toolCalls.map((tc, i) => {
+                const meta = TOOL_META[tc.tool] || { label: tc.tool, icon: '⚙' }
+                const status = tc.found === null ? 'running' : tc.found ? 'found' : 'miss'
+                const statusLabel = tc.found === null ? 'running' : tc.found ? 'results found' : 'no results'
+                return (
+                    <span
+                        key={i}
+                        className={`tool-pill tool-pill--${status}`}
+                        aria-label={`${meta.label}: ${statusLabel}`}
+                    >
+                        <span className="tool-pill__icon" aria-hidden="true">{meta.icon}</span>
+                        <span className="tool-pill__label">{meta.label}</span>
+                        {tc.found === null && <span className="tool-pill__spinner" aria-hidden="true" />}
+                        {tc.found === true  && <span className="tool-pill__dot tool-pill__dot--found" aria-hidden="true" />}
+                        {tc.found === false && <span className="tool-pill__dot tool-pill__dot--miss" aria-hidden="true" />}
+                    </span>
+                )
+            })}
+        </div>
+    )
+}
+
+function Message({ msg, onRetry }) {
     const [copied, setCopied] = useState(false)
     const isError = Boolean(msg.error && !msg.loading && !msg.streaming)
     const isDone  = msg.role === 'assistant' && !msg.loading && !msg.streaming && msg.content
@@ -220,21 +270,25 @@ function Message({ msg, onRetry, onRegenerate }) {
 
     return (
         <div className={`message message--${msg.role}`}>
-            {/* Avatar */}
-            <div className="message__avatar">
+            <div className="message__avatar" aria-hidden="true">
                 {isUser ? <UserIcon /> : <BotIcon />}
             </div>
 
             <div className="message__body">
-                {/* Sender label + timestamp */}
                 <div className="message__header">
                     <span className="message__sender">{isUser ? 'You' : 'Fynd AI'}</span>
                     {msg.ts && <span className="message__ts">{formatTs(msg.ts)}</span>}
                 </div>
 
-                {/* Bubble */}
+                {!isUser && <ToolPills toolCalls={msg.toolCalls} />}
+
                 <div className={`message__bubble${isError ? ' message__bubble--error' : ''}`}>
-                    {msg.loading ? <TypingDots /> : (
+                    {msg.loading ? (
+                        <>
+                            <TypingDots />
+                            <span className="sr-only">Fynd AI is typing…</span>
+                        </>
+                    ) : (
                         isUser ? (
                             <span className="message__text">{msg.content}</span>
                         ) : (
@@ -242,13 +296,12 @@ function Message({ msg, onRetry, onRegenerate }) {
                                 <ReactMarkdown remarkPlugins={[remarkGfm]} components={MD_COMPONENTS}>
                                     {msg.content}
                                 </ReactMarkdown>
-                                {msg.streaming && <span className="stream-cursor" />}
+                                {msg.streaming && <span className="stream-cursor" aria-hidden="true" />}
                             </div>
                         )
                     )}
                 </div>
 
-                {/* Actions row */}
                 {isDone && (
                     <div className="message__actions">
                         {isError ? (
@@ -258,23 +311,20 @@ function Message({ msg, onRetry, onRegenerate }) {
                                 </button>
                             )
                         ) : (
-                            <>
-                                <button className="action-btn" onClick={() => {
+                            <button
+                                className="action-btn"
+                                aria-label={copied ? 'Copied to clipboard' : 'Copy response'}
+                                onClick={() => {
                                     navigator.clipboard.writeText(msg.content)
                                     setCopied(true)
                                     setTimeout(() => setCopied(false), 2000)
-                                }}>
-                                    {copied ? <><CheckIcon /> Copied</> : <><CopyIcon /> Copy</>}
-                                </button>
-                                {onRegenerate && (
-                                    <button className="action-btn action-btn--regen" onClick={onRegenerate}>
-                                        <RegenIcon /> Regenerate
-                                    </button>
-                                )}
-                            </>
+                                }}
+                            >
+                                {copied ? <><CheckIcon /> Copied</> : <><CopyIcon /> Copy</>}
+                            </button>
                         )}
                         {msg.ttft_ms && !isError && (
-                            <span className="ttft-badge">{msg.ttft_ms}ms</span>
+                            <span className="ttft-badge" title="Time to first token">{msg.ttft_ms}ms</span>
                         )}
                     </div>
                 )}
@@ -283,37 +333,11 @@ function Message({ msg, onRetry, onRegenerate }) {
     )
 }
 
-// ── Suggested prompts ─────────────────────────────────────────────────────────
-function SuggestedPrompts({ onSelect }) {
-    return (
-        <div className="suggested-prompts">
-            {SUGGESTED_PROMPTS.map((p, i) => (
-                <button key={i} className="prompt-card" onClick={() => onSelect(p.text)}>
-                    <span className="prompt-card__label">{p.label}</span>
-                    <span className="prompt-card__text">{p.text}</span>
-                </button>
-            ))}
-        </div>
-    )
-}
-
-
-// ── Status dot ────────────────────────────────────────────────────────────────
-const STATUS_LABEL = { loading: 'Loading…', ready: 'Model ready', error: 'Unavailable' }
-
-function StatusDot({ status }) {
-    return (
-        <div className="status-dot-wrap" title={STATUS_LABEL[status] ?? ''}>
-            <div className={`status-dot status-dot--${status ?? 'loading'}`} />
-            <span className="status-dot-label">{STATUS_LABEL[status] ?? 'Loading…'}</span>
-        </div>
-    )
-}
 
 // ── Sidebar ───────────────────────────────────────────────────────────────────
-function Sidebar({ convos, activeId, onSelect, onNew, onDelete, collapsed, onToggle, search, onSearch, modelStatus }) {
-    const groups  = groupByDate([...convos].sort((a, b) => b.updatedAt - a.updatedAt))
-    const MODEL   = import.meta.env.VITE_MODEL ?? 'gemma3:4b'
+function Sidebar({ convos, activeId, onSelect, onNew, onDelete, collapsed, onToggle, search, onSearch }) {
+    const [confirmDeleteId, setConfirmDeleteId] = useState(null)
+    const groups = groupByDate([...convos].sort((a, b) => b.updatedAt - a.updatedAt))
 
     const filtered = search.trim()
         ? (() => {
@@ -325,54 +349,86 @@ function Sidebar({ convos, activeId, onSelect, onNew, onDelete, collapsed, onTog
           })()
         : null
 
-    const STATUS_COLOR = { ready: '#34d399', loading: '#fbbf24', error: '#f87171' }
-    const dotColor = STATUS_COLOR[modelStatus] ?? STATUS_COLOR.loading
-    const isPulsing = modelStatus === 'loading'
-
     const renderItem = (c) => (
         <div
             key={c.id}
-            className={`sidebar__item ${c.id === activeId ? 'sidebar__item--active' : ''}`}
-            onClick={() => onSelect(c.id)}
+            className={`sidebar__item ${c.id === activeId ? 'sidebar__item--active' : ''} ${confirmDeleteId === c.id ? 'sidebar__item--confirming' : ''}`}
+            onClick={() => { if (confirmDeleteId !== c.id) { onSelect(c.id); setConfirmDeleteId(null) } }}
+            role="button"
+            tabIndex={0}
+            aria-label={c.title}
+            aria-current={c.id === activeId ? 'true' : undefined}
+            onKeyDown={e => {
+                if ((e.key === 'Enter' || e.key === ' ') && confirmDeleteId !== c.id) {
+                    e.preventDefault()
+                    onSelect(c.id)
+                    setConfirmDeleteId(null)
+                }
+            }}
         >
             <ChatIcon />
             <span className="sidebar__item-title">{c.title}</span>
-            <button
-                className="sidebar__item-delete"
-                onClick={e => { e.stopPropagation(); onDelete(c.id) }}
-                title="Delete"
-            >
-                <TrashIcon />
-            </button>
+            {confirmDeleteId === c.id ? (
+                <div className="sidebar__item-confirm" onClick={e => e.stopPropagation()}>
+                    <button
+                        className="sidebar__item-confirm-yes"
+                        onClick={e => { e.stopPropagation(); onDelete(c.id); setConfirmDeleteId(null) }}
+                        aria-label={`Confirm delete "${c.title}"`}
+                    >
+                        Delete
+                    </button>
+                    <button
+                        className="sidebar__item-confirm-no"
+                        onClick={e => { e.stopPropagation(); setConfirmDeleteId(null) }}
+                        aria-label="Cancel delete"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            ) : (
+                <button
+                    className="sidebar__item-delete"
+                    onClick={e => { e.stopPropagation(); setConfirmDeleteId(c.id) }}
+                    aria-label={`Delete "${c.title}"`}
+                >
+                    <TrashIcon />
+                </button>
+            )}
         </div>
     )
 
     return (
-        <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`}>
+        <aside className={`sidebar ${collapsed ? 'sidebar--collapsed' : ''}`} aria-label="Conversation history">
             <div className="sidebar__header">
                 {!collapsed && <span className="sidebar__logo">Fynd AI</span>}
-                <button className="sidebar__toggle" onClick={onToggle} title="Toggle sidebar">
+                <button
+                    className="sidebar__toggle"
+                    onClick={onToggle}
+                    aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+                    aria-expanded={!collapsed}
+                >
                     <MenuIcon />
                 </button>
             </div>
 
             {!collapsed && (
                 <>
-                    <button className="sidebar__new-btn" onClick={onNew}>
+                    <button className="sidebar__new-btn" onClick={onNew} aria-label="Start new chat">
                         <PlusIcon /><span>New chat</span>
                     </button>
 
                     <div className="sidebar__search">
-                        <SearchIcon />
+                        <SearchIcon aria-hidden="true" />
                         <input
-                            type="text"
+                            type="search"
                             placeholder="Search chats…"
                             value={search}
                             onChange={e => onSearch(e.target.value)}
+                            aria-label="Search conversations"
                         />
                     </div>
 
-                    <div className="sidebar__list">
+                    <div className="sidebar__list" role="list">
                         {filtered ? (
                             filtered.length > 0
                                 ? filtered.map(renderItem)
@@ -388,28 +444,12 @@ function Sidebar({ convos, activeId, onSelect, onNew, onDelete, collapsed, onTog
                             )
                         )}
                     </div>
-
-                    {/* Footer: model badge */}
-                    <div className="sidebar__footer">
-                        <div className="sidebar__model-badge">
-                            <div
-                                className={`sidebar__model-dot${isPulsing ? ' sidebar__model-dot--pulse' : ''}`}
-                                style={{ background: dotColor }}
-                            />
-                            <div className="sidebar__model-info">
-                                <span className="sidebar__model-name">{MODEL}</span>
-                                <span className="sidebar__model-status">
-                                    {STATUS_LABEL[modelStatus] ?? 'Loading…'}
-                                </span>
-                            </div>
-                        </div>
-                    </div>
                 </>
             )}
 
             {collapsed && (
                 <div className="sidebar__collapsed-actions">
-                    <button className="sidebar__icon-btn" onClick={onNew} title="New chat">
+                    <button className="sidebar__icon-btn" onClick={onNew} aria-label="Start new chat">
                         <PlusIcon />
                     </button>
                 </div>
@@ -418,14 +458,182 @@ function Sidebar({ convos, activeId, onSelect, onNew, onDelete, collapsed, onTog
     )
 }
 
+// ── Upload Panel ─────────────────────────────────────────────────────────────
+function UploadPanel() {
+    const [state, setState]       = useState('idle')
+    const [progress, setProgress] = useState({ done: 0, total: 0, title: '' })
+    const [result, setResult]     = useState(null)
+    const [dragging, setDragging] = useState(false)
+    const inputRef = useRef(null)
+
+    async function handleFile(file) {
+        if (!file) return
+        const ext = file.name.split('.').pop().toLowerCase()
+        if (!['csv', 'xlsx', 'xls'].includes(ext)) {
+            setState('error')
+            setResult({ message: 'Only CSV or Excel files supported.' })
+            return
+        }
+
+        setState('uploading')
+        setProgress({ done: 0, total: 0, title: '' })
+        setResult(null)
+
+        const form = new FormData()
+        form.append('file', file)
+
+        try {
+            const res = await fetch(`${API_URL}/upload`, { method: 'POST', body: form })
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}))
+                throw new Error(err.detail || `Server error ${res.status}`)
+            }
+
+            const reader  = res.body.getReader()
+            const decoder = new TextDecoder()
+            let   buf     = ''
+
+            while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                buf += decoder.decode(value, { stream: true })
+                const lines = buf.split('\n')
+                buf = lines.pop() ?? ''
+                for (const line of lines) {
+                    if (!line.trim()) continue
+                    try {
+                        const evt = JSON.parse(line)
+                        if (evt.status === 'progress') {
+                            setProgress({ done: evt.done, total: evt.total, title: evt.title })
+                        } else if (evt.status === 'done') {
+                            setState('done')
+                            setResult(evt)
+                        }
+                    } catch {}
+                }
+            }
+        } catch (err) {
+            setState('error')
+            setResult({ message: err.message })
+        }
+    }
+
+    function onDrop(e) {
+        e.preventDefault()
+        setDragging(false)
+        handleFile(e.dataTransfer.files[0])
+    }
+
+    const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
+
+    return (
+        <div className="upload-panel">
+            {state === 'idle' || state === 'error' ? (
+                <div
+                    className={`upload-zone ${dragging ? 'upload-zone--drag' : ''}`}
+                    onClick={() => inputRef.current?.click()}
+                    onDragOver={e => { e.preventDefault(); setDragging(true) }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={onDrop}
+                    role="button"
+                    tabIndex={0}
+                    aria-label="Upload product catalog. Accepts CSV or Excel. Click or drag and drop."
+                    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') inputRef.current?.click() }}
+                >
+                    <span className="upload-zone__icon" aria-hidden="true">⬆</span>
+                    <span className="upload-zone__text">CSV or Excel</span>
+                    <span className="upload-zone__hint">click or drag & drop</span>
+                    <input
+                        ref={inputRef}
+                        type="file"
+                        accept=".csv,.xlsx,.xls"
+                        style={{ display: 'none' }}
+                        onChange={e => handleFile(e.target.files[0])}
+                        aria-hidden="true"
+                        tabIndex={-1}
+                    />
+                </div>
+            ) : state === 'uploading' ? (
+                <div className="upload-progress" role="status">
+                    <div
+                        className="upload-progress__bar"
+                        role="progressbar"
+                        aria-valuenow={pct}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-label={`Upload progress: ${pct}%`}
+                    >
+                        <div className="upload-progress__fill" style={{ width: `${pct}%` }} />
+                    </div>
+                    <div className="upload-progress__label">
+                        Embedding {progress.done}/{progress.total}
+                    </div>
+                    {progress.title && (
+                        <div className="upload-progress__title">{progress.title}</div>
+                    )}
+                </div>
+            ) : state === 'done' ? (
+                <div className="upload-result upload-result--ok" role="status">
+                    <span>✓ {result?.added} products added</span>
+                    {result?.skipped > 0 && <span className="upload-result__skip">{result.skipped} skipped</span>}
+                    <button className="upload-result__reset" onClick={() => setState('idle')}>Upload more</button>
+                </div>
+            ) : null}
+
+            {state === 'error' && (
+                <div className="upload-result upload-result--err" role="alert">
+                    {result?.message || 'Upload failed'}
+                </div>
+            )}
+        </div>
+    )
+}
+
 // ── Settings Modal ────────────────────────────────────────────────────────────
 function SettingsModal({ personality, setPersonality, customPrompt, setCustomPrompt, onClose }) {
+    const modalRef = useRef(null)
+
+    useEffect(() => {
+        // Move focus into modal on open
+        const focusable = modalRef.current?.querySelectorAll(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+        )
+        focusable?.[0]?.focus()
+
+        const handleKey = (e) => {
+            if (e.key === 'Escape') { onClose(); return }
+            if (e.key === 'Tab' && modalRef.current) {
+                const els = Array.from(modalRef.current.querySelectorAll(
+                    'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+                ))
+                const first = els[0]
+                const last  = els[els.length - 1]
+                if (e.shiftKey && document.activeElement === first) {
+                    e.preventDefault(); last.focus()
+                } else if (!e.shiftKey && document.activeElement === last) {
+                    e.preventDefault(); first.focus()
+                }
+            }
+        }
+        document.addEventListener('keydown', handleKey)
+        return () => document.removeEventListener('keydown', handleKey)
+    }, [onClose])
+
     return (
-        <div className="modal-overlay" onClick={onClose}>
-            <div className="modal" onClick={e => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={onClose} aria-hidden="true">
+            <div
+                className="modal"
+                ref={modalRef}
+                onClick={e => e.stopPropagation()}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="settings-title"
+            >
                 <div className="modal__header">
-                    <h2>Settings</h2>
-                    <button className="modal__close" onClick={onClose}><CloseIcon /></button>
+                    <h2 id="settings-title">Settings</h2>
+                    <button className="modal__close" onClick={onClose} aria-label="Close settings">
+                        <CloseIcon />
+                    </button>
                 </div>
                 <div className="modal__content">
                     <p className="modal__description">Choose how the AI assistant responds:</p>
@@ -435,6 +643,7 @@ function SettingsModal({ personality, setPersonality, customPrompt, setCustomPro
                                 key={key}
                                 className={`personality-card ${personality === key ? 'personality-card--active' : ''}`}
                                 onClick={() => { setPersonality(key); onClose() }}
+                                aria-pressed={personality === key}
                             >
                                 <div className="personality-card__name">
                                     {key.charAt(0).toUpperCase() + key.slice(1)}
@@ -449,6 +658,7 @@ function SettingsModal({ personality, setPersonality, customPrompt, setCustomPro
                             <button
                                 className={`custom-toggle ${personality === 'custom' ? 'custom-toggle--active' : ''}`}
                                 onClick={() => setPersonality('custom')}
+                                aria-pressed={personality === 'custom'}
                             >
                                 {personality === 'custom' ? '✓ Active' : 'Use Custom'}
                             </button>
@@ -459,7 +669,16 @@ function SettingsModal({ personality, setPersonality, customPrompt, setCustomPro
                             onChange={e => setCustomPrompt(e.target.value)}
                             placeholder="Enter your custom instructions…"
                             rows={4}
+                            aria-label="Custom system instructions"
                         />
+                    </div>
+
+                    <div className="catalog-section">
+                        <div className="catalog-section__header">
+                            <h3>Product Catalog</h3>
+                            <p className="catalog-section__desc">Import products to make them searchable in chat.</p>
+                        </div>
+                        <UploadPanel />
                     </div>
                 </div>
             </div>
@@ -469,14 +688,12 @@ function SettingsModal({ personality, setPersonality, customPrompt, setCustomPro
 
 // ── App ───────────────────────────────────────────────────────────────────────
 export default function App() {
-    // Single localStorage parse on init
-    const [convos, setConvos]   = useState(loadConversations)
-    const [activeId, setActiveId] = useState(() => {
-        try {
-            const raw = JSON.parse(localStorage.getItem(STORAGE_KEY))
-            return Array.isArray(raw) && raw.length > 0 ? raw[0].id : null
-        } catch { return null }
+    const [convos, setConvos] = useState(() => {
+        const stored = loadConversations()
+        if (stored[0]?.messages?.length > 0) return [newConversation(), ...stored]
+        return stored
     })
+    const [activeId, setActiveId] = useState(() => convos[0].id)
 
     const [input, setInput]               = useState('')
     const [loading, setLoading]           = useState(false)
@@ -485,7 +702,6 @@ export default function App() {
     const [personality, setPersonality]   = useState('helpful')
     const [customPrompt, setCustomPrompt] = useState('You are a helpful AI assistant.')
     const [search, setSearch]             = useState('')
-    const [modelStatus, setModelStatus]   = useState('loading')
     const [showScrollBtn, setShowScrollBtn] = useState(false)
 
     const textareaRef    = useRef(null)
@@ -502,30 +718,12 @@ export default function App() {
     const messages    = activeConvo?.messages ?? []
     const isHome      = messages.length === 0
 
-    // ── Debounced localStorage ────────────────────────────────────────────────
     useEffect(() => {
         clearTimeout(saveTimerRef.current)
         saveTimerRef.current = setTimeout(() => saveConversations(convos), 1000)
         return () => clearTimeout(saveTimerRef.current)
     }, [convos])
 
-    // ── Model status polling ──────────────────────────────────────────────────
-    useEffect(() => {
-        const check = async () => {
-            try {
-                const r = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(5000) })
-                const d = await r.json()
-                setModelStatus(d.model_ready ? 'ready' : 'loading')
-            } catch {
-                setModelStatus('error')
-            }
-        }
-        check()
-        const id = setInterval(check, 30_000)
-        return () => clearInterval(id)
-    }, [])
-
-    // ── Auto-resize textarea ──────────────────────────────────────────────────
     useEffect(() => {
         const ta = textareaRef.current
         if (!ta) return
@@ -533,7 +731,6 @@ export default function App() {
         ta.style.height = Math.min(ta.scrollHeight, 200) + 'px'
     }, [input])
 
-    // ── Auto-scroll ───────────────────────────────────────────────────────────
     useEffect(() => {
         if (!userScrolledUp.current) bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     }, [messages])
@@ -567,7 +764,6 @@ export default function App() {
         }
     }, [updateConvo])
 
-    // ── Conversation actions ──────────────────────────────────────────────────
     const handleNew = () => {
         const c = newConversation()
         setConvos(prev => [c, ...prev])
@@ -575,6 +771,7 @@ export default function App() {
         setInput('')
         userScrolledUp.current = false
         setShowScrollBtn(false)
+        if (window.innerWidth <= 768) setSidebarCollapsed(true)
     }
 
     const handleDelete = (id) => {
@@ -594,9 +791,9 @@ export default function App() {
         setActiveId(id)
         userScrolledUp.current = false
         setShowScrollBtn(false)
+        if (window.innerWidth <= 768) setSidebarCollapsed(true)
     }
 
-    // ── Export chat as Markdown ───────────────────────────────────────────────
     const handleExport = useCallback(() => {
         const msgs = activeConvo?.messages ?? []
         const lines = [`# ${activeConvo?.title ?? 'Chat'}\n\n`]
@@ -613,7 +810,6 @@ export default function App() {
         URL.revokeObjectURL(url)
     }, [activeConvo])
 
-    // ── Retry (error messages) ────────────────────────────────────────────────
     const handleRetry = useCallback((retryContent) => {
         updateConvo(activeId, c => {
             const msgs = [...c.messages]
@@ -625,32 +821,12 @@ export default function App() {
         setTimeout(() => textareaRef.current?.focus(), 50)
     }, [activeId, updateConvo])
 
-    // ── Regenerate (successful messages) ─────────────────────────────────────
-    const handleRegenerate = useCallback((msgIndex) => {
-        if (loading) return
-        const msgs = activeConvo?.messages ?? []
-        let userIdx = -1
-        for (let i = msgIndex - 1; i >= 0; i--) {
-            if (msgs[i].role === 'user') { userIdx = i; break }
-        }
-        if (userIdx < 0) return
-        const retryContent = msgs[userIdx].content
-        updateConvo(activeId, c => ({
-            ...c,
-            messages: c.messages.slice(0, userIdx)
-        }))
-        setInput(retryContent)
-        setTimeout(() => textareaRef.current?.focus(), 50)
-    }, [activeId, activeConvo, loading, updateConvo])
-
-    // ── Scroll to bottom ──────────────────────────────────────────────────────
     const scrollToBottom = () => {
         userScrolledUp.current = false
         setShowScrollBtn(false)
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
 
-    // ── Submit ────────────────────────────────────────────────────────────────
     const handleSubmit = async (text = input) => {
         const question = text.trim()
         if (!question || loading) return
@@ -720,7 +896,27 @@ export default function App() {
                     let event
                     try { event = JSON.parse(line.slice(6)) } catch { continue }
 
-                    if (event.type === 'token' && event.content) {
+                    if (event.type === 'tool_call') {
+                        updateConvo(currentId, c => {
+                            const msgs = [...c.messages]
+                            const last = msgs[msgs.length - 1]
+                            const calls = [...(last.toolCalls || []), { tool: event.tool, query: event.query, found: null }]
+                            msgs[msgs.length - 1] = { ...last, toolCalls: calls }
+                            return { ...c, messages: msgs }
+                        })
+
+                    } else if (event.type === 'tool_result') {
+                        updateConvo(currentId, c => {
+                            const msgs = [...c.messages]
+                            const last = msgs[msgs.length - 1]
+                            const calls = (last.toolCalls || []).map((tc, i) =>
+                                i === (last.toolCalls.length - 1) ? { ...tc, found: event.found } : tc
+                            )
+                            msgs[msgs.length - 1] = { ...last, toolCalls: calls }
+                            return { ...c, messages: msgs }
+                        })
+
+                    } else if (event.type === 'token' && event.content) {
                         if (firstToken) {
                             firstToken = false
                             updateConvo(currentId, c => {
@@ -733,7 +929,6 @@ export default function App() {
                                 }
                                 return { ...c, messages: msgs }
                             })
-                            // 50ms flush — cuts re-renders from ~1000 to ~20
                             flushTimerRef.current = setInterval(() => {
                                 if (tokenBufferRef.current) {
                                     const chunk = tokenBufferRef.current
@@ -761,13 +956,13 @@ export default function App() {
                             return { ...c, messages: msgs }
                         })
 
-                    } else if (event.type === 'error' || event.type === 'blocked') {
+                    } else if (event.type === 'error') {
                         stopFlush(currentId)
                         updateConvo(currentId, c => {
                             const msgs = [...c.messages]
                             msgs[msgs.length - 1] = {
                                 ...msgs[msgs.length - 1],
-                                content: event.message || event.refusal,
+                                content: event.message,
                                 loading: false,
                                 streaming: false,
                                 error: true,
@@ -830,16 +1025,28 @@ export default function App() {
         e.target.value = ''
     }
 
-    // ── Character counter class ───────────────────────────────────────────────
     const charCountClass = input.length > 1800
         ? 'char-counter char-counter--danger'
         : input.length > 1200
             ? 'char-counter char-counter--warn'
             : 'char-counter'
 
-    // ── Render ────────────────────────────────────────────────────────────────
     return (
         <div className="app">
+            {/* Screen-reader live region for AI response state */}
+            <div aria-live="polite" aria-atomic="true" className="sr-only">
+                {loading ? 'Fynd AI is responding…' : ''}
+            </div>
+
+            {/* Mobile sidebar overlay */}
+            {!sidebarCollapsed && (
+                <div
+                    className="sidebar-overlay"
+                    onClick={() => setSidebarCollapsed(true)}
+                    aria-hidden="true"
+                />
+            )}
+
             <Sidebar
                 convos={convos}
                 activeId={activeId}
@@ -850,64 +1057,60 @@ export default function App() {
                 onToggle={() => setSidebarCollapsed(v => !v)}
                 search={search}
                 onSearch={setSearch}
-                modelStatus={modelStatus}
             />
 
             <div className="workspace">
-                {/* Top bar */}
                 <header className="topbar">
+                    <button
+                        className="topbar__menu-btn"
+                        onClick={() => setSidebarCollapsed(false)}
+                        aria-label="Open navigation"
+                    >
+                        <MenuIcon />
+                    </button>
                     <span className="topbar__title">{!isHome && activeConvo?.title}</span>
                     <div className="topbar__actions">
-                        <StatusDot status={modelStatus} />
                         {!isHome && messages.some(m => m.content && !m.loading) && (
-                            <button className="topbar__btn" onClick={handleExport} title="Export chat">
+                            <button className="topbar__btn" onClick={handleExport}>
                                 <ExportIcon /> Export
                             </button>
                         )}
                         <button
                             className="topbar__icon-btn topbar__icon-btn--settings"
                             onClick={() => setShowSettings(true)}
-                            title="Settings"
+                            aria-label="Open settings"
                         >
                             <SettingsIcon />
                         </button>
                     </div>
                 </header>
 
-                {/* Main */}
                 <main className={`main ${isHome ? 'main--home' : 'main--chat'}`}>
                     {isHome ? (
                         <div className="home">
                             <img src="/logo.png" alt="Fynd AI" className="home__logo" />
                             <h1 className="home__heading">What can I help with?</h1>
-                            {/* <SuggestedPrompts onSelect={t => { setInput(t); textareaRef.current?.focus() }} /> */}
+                            <SuggestedPrompts onSelect={t => { setInput(t); textareaRef.current?.focus() }} />
                         </div>
                     ) : (
                         <div className="chat" ref={chatRef} onScroll={handleChatScroll}>
-                            {messages.map((msg, idx) => (
+                            {messages.map((msg) => (
                                 <Message
                                     key={msg.id}
                                     msg={msg}
                                     onRetry={msg.error ? () => handleRetry(msg.retryContent) : null}
-                                    onRegenerate={
-                                        msg.role === 'assistant' && !msg.loading && !msg.streaming && !msg.error && !loading
-                                            ? () => handleRegenerate(idx)
-                                            : null
-                                    }
                                 />
                             ))}
                             <div ref={bottomRef} />
                         </div>
                     )}
 
-                    {/* Scroll to bottom FAB */}
                     {showScrollBtn && (
-                        <button className="scroll-btn" onClick={scrollToBottom} title="Scroll to bottom">
+                        <button className="scroll-btn" onClick={scrollToBottom} aria-label="Scroll to bottom">
                             <ChevronDownIcon />
                         </button>
                     )}
 
-                    {/* Composer */}
                     <div className={`composer-wrap ${isHome ? 'composer-wrap--home' : 'composer-wrap--bottom'}`}>
                         <div className="composer">
                             <textarea
@@ -919,6 +1122,8 @@ export default function App() {
                                 onKeyDown={handleKeyDown}
                                 maxLength={MAX_INPUT_CHARS}
                                 rows={1}
+                                aria-label="Message input"
+                                aria-describedby={input.length > 800 ? 'char-count' : undefined}
                             />
                             <div className="composer__toolbar">
                                 <div className="composer__toolbar-left">
@@ -928,19 +1133,29 @@ export default function App() {
                                         multiple
                                         style={{ display: 'none' }}
                                         onChange={handleFileChange}
+                                        aria-hidden="true"
+                                        tabIndex={-1}
                                     />
-                                    <button className="icon-btn" title="Attach file" onClick={() => fileRef.current?.click()}>
-                                        <PlusIcon />
+                                    <button
+                                        className="icon-btn"
+                                        aria-label="Attach file"
+                                        onClick={() => fileRef.current?.click()}
+                                    >
+                                        <AttachIcon />
                                     </button>
                                     {input.length > 800 && (
-                                        <span className={charCountClass}>
+                                        <span id="char-count" className={charCountClass} aria-live="polite">
                                             {input.length}/{MAX_INPUT_CHARS}
                                         </span>
                                     )}
                                 </div>
                                 <div className="composer__toolbar-right">
                                     {loading ? (
-                                        <button className="send-btn send-btn--stop" onClick={handleStop} title="Stop generation">
+                                        <button
+                                            className="send-btn send-btn--stop"
+                                            onClick={handleStop}
+                                            aria-label="Stop generation"
+                                        >
                                             <StopIcon />
                                         </button>
                                     ) : (
@@ -948,7 +1163,7 @@ export default function App() {
                                             className={`send-btn ${input.trim() ? 'send-btn--active' : ''}`}
                                             onClick={() => handleSubmit()}
                                             disabled={!input.trim()}
-                                            title="Send"
+                                            aria-label="Send message"
                                         >
                                             <SendIcon />
                                         </button>
