@@ -9,8 +9,8 @@ deploy:
         cpu: "4"
         memory: 32Gi
     volumes:
-        - name: ollama-models
-          mountPath: /app/.ollama
+        - mountPath: /app/.ollama
+          name: ollama-models
           size: 25Gi
 environment:
     - name: PORT
@@ -28,9 +28,9 @@ environment:
     - name: OLLAMA_NUM_THREADS
       value: "4"
     - name: GOMEMLIMIT
-      value: "28000MiB"
+      value: 28000MiB
     - name: RATE_LIMIT
-      value: "120/minute"
+      value: 120/minute
     - name: MAX_QUEUE_DEPTH
       value: "16"
     - name: QUEUE_TIMEOUT_SECONDS
@@ -58,21 +58,6 @@ environment:
     - name: OLLAMA_USE_MMAP
       value: "1"
 serverlessConfig:
-    Env:
-        APPLICATION_ENV_PREFIX: BOLT
-        BOLT_APPLICATION_ACCOUNT_ID: b274cb0b-f8b2-4aac-b79f-71eb7d2e3fe5
-        BOLT_APPLICATION_AUTO_STOP: "false"
-        BOLT_APPLICATION_CODE_TYPE: ""
-        BOLT_APPLICATION_LANGUAGE: python/3.11
-        BOLT_APPLICATION_MAX_IDLE_TIME: "300"
-        BOLT_APPLICATION_NAME: llama Qwen
-        BOLT_APPLICATION_ORG_ID: b274cb0b-f8b2-4aac-b79f-71eb7d2e3fe5
-        BOLT_APPLICATION_PORT: "8080"
-        BOLT_APPLICATION_PROTOCOL: http
-        BOLT_APPLICATION_REGION_ID: asia-south1
-        BOLT_APPLICATION_RUNTIME: git
-        BOLT_APPLICATION_SLUG: llama-qwen
-        BOLT_APPLICATION_VERSION: "0"
     PortMap:
         - Protocol: http
           Port: 8080
@@ -83,10 +68,10 @@ serverlessConfig:
         Max: 1
         MaxIdleTime: 300
     Resources:
-        CPU: 16
+        CPU: 8
         MemoryMB: 32768
         MemoryMaxMB: 32768
-        DiskMB: 30720
+        DiskMB: 100
     Timeout: 60
 service:
     description: Ollama Gemma3 4B AI Assistant — React frontend + FastAPI backend
