@@ -26,27 +26,27 @@ environment:
     - name: MAX_HISTORY_CHARS
       value: "40000"
     - name: APP_SITE_URL
-      value: https://llama-qwen-e5b9730c.serverless.boltic.app
+      value: https://your-app.serverless.boltic.app
     - name: APP_TITLE
       value: Fynd AI
     - name: BOLTIC_TOKEN
-      value: 15647a83-d0be-4e24-b352-97bbc688d695
+      value: your-boltic-token-uuid
     - name: BOLTIC_PRODUCTS_TABLE
-      value: 735364bf-48e3-4723-b549-e3e123562d2a
+      value: your-products-table-uuid
     - name: BOLTIC_RECS_TABLE
-      value: db2b84be-744e-4e16-a369-d3d7d17b2ec4
+      value: your-recs-table-uuid
     - name: PYTHONUNBUFFERED
       value: "1"
     - name: WEB_CONCURRENCY
       value: "6"
 serverlessConfig:
     Env:
-        BOLTIC_TOKEN: 15647a83-d0be-4e24-b352-97bbc688d695
-        BOLTIC_PRODUCTS_TABLE: 735364bf-48e3-4723-b549-e3e123562d2a
-        BOLTIC_RECS_TABLE: db2b84be-744e-4e16-a369-d3d7d17b2ec4
+        BOLTIC_TOKEN: your-boltic-token-uuid
+        BOLTIC_PRODUCTS_TABLE: your-products-table-uuid
+        BOLTIC_RECS_TABLE: your-recs-table-uuid
         EMBEDDINGS_MODEL: openai/text-embedding-3-small
         MODEL: openai/gpt-4o-mini
-        OPENROUTER_API_KEY: ""  # Set via secrets manager or deployment env — never hardcode
+        OPENROUTER_API_KEY: your-openrouter-api-key
         DEFAULT_TEMPERATURE: "0.45"
         DEFAULT_MAX_TOKENS: "2048"
         WEB_CONCURRENCY: "6"
