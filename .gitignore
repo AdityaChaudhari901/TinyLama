@@ -5,6 +5,10 @@ Backend/.env
 Backend/seed.py
 Backend/scripts/
 test_concurrency.py
+tests/
+
+# pytest
+.pytest_cache/
 
 # Node
 Frontend/node_modules/

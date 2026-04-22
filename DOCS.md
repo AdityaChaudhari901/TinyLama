@@ -1,300 +1,397 @@
-# Fynd AI — Application Documentation
-
-## Overview
-
-Fynd AI is a product shopping assistant built for the Fynd catalog. Users can search for products, get recommendations, and have natural conversations powered by GPT-4o-mini via OpenRouter. Products are stored in Boltic Tables with vector embeddings for semantic search.
+# Fynd AI — How It Works (Step by Step)
 
 ---
 
-## Architecture
+## Step 1 — Server Starts Up
+
+When the Docker container starts, `start.sh` launches **6 uvicorn worker processes** of the FastAPI app.
+
+Each worker independently runs the startup sequence in `app.py`:
 
 ```
-Browser (React SPA)
-       │
-       │  SSE / HTTP
-       ▼
-FastAPI Backend (Python)
-       │
-       ├── OpenRouter API  ─── GPT-4o-mini (chat + tool calling)
-       │                  ─── text-embedding-3-small (embeddings)
-       │
-       └── Boltic Tables
-               ├── Products Table  (title, brand, category, price, rating, embedding)
-               └── Recs Table      (pre-computed recommendations — currently unused)
-```
-
-**Deployment:** Docker container on Boltic Serverless (asia-south1)
-- 8 CPU cores, 32 GB RAM
-- 6 uvicorn workers (`WEB_CONCURRENCY=6`)
-- URL: `https://llama-qwen-e5b9730c.serverless.boltic.app`
-
----
-
-## Tech Stack
-
-| Layer     | Technology                          |
-|-----------|-------------------------------------|
-| Frontend  | React 18, Vite, react-markdown      |
-| Backend   | FastAPI, Python 3.11, uvicorn       |
-| AI        | OpenRouter → GPT-4o-mini            |
-| Embeddings| OpenRouter → text-embedding-3-small |
-| Database  | Boltic Tables (vector store)        |
-| Container | Docker (multi-stage build)          |
-| Hosting   | Boltic Serverless                   |
-
----
-
-## How It Works
-
-### 1. Product Storage (Boltic Tables)
-
-Products are stored in a Boltic Table with the following fields:
-
-| Field         | Type   | Description                                      |
-|---------------|--------|--------------------------------------------------|
-| `id`          | UUID   | Auto-generated unique ID                         |
-| `title`       | String | Product name                                     |
-| `brand`       | String | Brand name                                       |
-| `category`    | String | Product category                                 |
-| `price`       | String | Price (e.g. `$49.99`)                            |
-| `rating`      | String | Rating out of 5                                  |
-| `description` | String | Product description                              |
-| `features`    | String | Semicolon-separated feature list                 |
-| `availability`| String | Stock status                                     |
-| `embedding`   | Vector | 1536-dimensional float vector (text-embedding-3-small) |
-
-On every server startup, all products are fetched from Boltic and loaded into **in-memory store** (`_product_store`). Each of the 6 workers independently loads the full catalog.
-
----
-
-### 2. Vector Search (RAG)
-
-When a user asks about products, the app uses Retrieval-Augmented Generation:
-
-```
-User query
+Worker boots
     │
-    ▼
-Embed query with text-embedding-3-small
+    ├─ 1. Create a shared httpx.AsyncClient (100 max connections)
     │
-    ▼
-Cosine similarity against all product embeddings in memory
+    ├─ 2. Create a CatalogService (empty in-memory store)
     │
-    ├── Score ≥ 0.50 threshold → return top-5 results
+    ├─ 3. Fetch ALL products from Boltic Products Table
+    │       → HTTP POST to Boltic Tables API, paginated 100 rows/page
+    │       → Each row contains title, brand, category, price, description,
+    │          features, availability, and a pre-computed 1536-dim embedding
+    │       → Stored as typed Product objects in memory
+    │       → P-IDs assigned: P001, P002, P003 … (short stable IDs for LLM)
     │
-    └── No results → keyword fallback (title + brand + category match)
+    ├─ 4. Fetch ALL rows from Boltic Recommendations Table
+    │       → Pre-computed similarity scores seeded offline
+    │       → Stored as {P001: [{recommended: P007, score: 0.94, rank: 1}, …]}
+    │
+    └─ 5. Start background task to repeat steps 3–4 every 5 minutes
 ```
 
-**Cosine similarity** is computed in pure Python:
-```python
-dot(a, b) / (norm(a) * norm(b))
-```
-
-**Speculative embedding** optimisation: the user's message is embedded in parallel with the Turn-1 tool-decision LLM call. If the LLM decides to call `search_products`, the embedding is already ready — saving one sequential round-trip (~200–400 ms).
+After this, each worker holds the **entire product catalog in RAM** — no database call needed at query time.
 
 ---
 
-### 3. Tool Calling Pipeline
+## Step 2 — User Opens the App
 
-The backend exposes two tools to the LLM:
+The browser loads the **React SPA** served from FastAPI at `/`.
 
-#### `search_products`
-Searches the product catalog using semantic similarity.
+The frontend was compiled at Docker build time:
+- Vite bundles React + all dependencies → `/dist/assets/index-*.js`
+- FastAPI serves `/dist/index.html` for any unmatched route
+- FastAPI serves `/dist/assets/*` for JS/CSS/fonts
 
-**Parameters:**
-- `query` (required) — natural language search query
-- `max_price` (optional) — filter by maximum price
-- `min_price` (optional) — filter by minimum price
-
-**Flow:**
-1. Embed the query
-2. Run cosine similarity search against `_product_store`
-3. Apply price filter if provided (scans full catalog, then re-ranks by similarity)
-4. Deduplicate by title
-5. Return top-5 products
-
-#### `get_recommendations`
-Finds similar products using the source product's own embedding as the query vector.
-
-**Parameters:**
-- `product_id` (required) — P-ID (e.g. `P001`) or UUID
-
-**Flow:**
-1. Resolve product by ID
-2. Use product's embedding as query vector
-3. Score every other product by cosine similarity
-4. Return same-category products first, then cross-category fill-up to top-5
+The user sees the home screen with 4 **suggested prompts** and an empty chat.
 
 ---
 
-### 4. Chat Flow (SSE Streaming)
+## Step 3 — User Types a Message
 
-```
-POST /ask/stream
-       │
-       ├─ Turn 1 (non-streaming, fast ~200ms)
-       │       Send messages + tools to GPT-4o-mini
-       │       LLM decides: call tool OR answer directly
-       │
-       ├─ If tool call:
-       │       Execute search_products / get_recommendations locally
-       │       Append tool result to messages
-       │       Repeat up to 3 rounds (allows search → recommend in sequence)
-       │
-       └─ Turn 2 (streaming)
-               Stream final answer token-by-token to browser via SSE
+Example: **"Show me Adidas shoes under $200"**
+
+The frontend:
+1. Adds the message to the conversation state
+2. Adds a "loading" placeholder bot message (shows animated dots)
+3. Sends `POST /ask/stream` with the full conversation history:
+
+```json
+{
+  "messages": [
+    { "role": "user", "content": "Show me Adidas shoes under $200" }
+  ]
+}
 ```
 
-**SSE event types:**
-
-| Event type    | Description                              |
-|---------------|------------------------------------------|
-| `tool_call`   | A tool is being called (shows pill in UI)|
-| `tool_result` | Tool returned results (updates pill)     |
-| `token`       | A streamed text token                    |
-| `done`        | Response complete, includes `ttft_ms`    |
-| `error`       | An error occurred                        |
+4. Opens the response as an **SSE (Server-Sent Events) stream**
 
 ---
 
-### 5. Context Window Management
+## Step 4 — Backend Receives the Request
 
-Conversation history is trimmed to fit within `MAX_HISTORY_CHARS` (40,000 chars) by dropping oldest messages first, always preserving the last user message.
+FastAPI routes it to `routers/chat.py → ask_stream()`.
 
----
-
-### 6. Frontend Architecture
+The backend:
+1. Builds the message list: `[system_prompt] + conversation_history`
+2. Trims history to stay under 40,000 characters (drops oldest messages first)
+3. Fires two things **in parallel** immediately:
+   - **Turn 1**: Sends messages to GPT-4o-mini (non-streaming, tool_choice=auto)
+   - **Speculative embed**: Embeds the user message using text-embedding-3-small
 
 ```
-App (state: convos, activeId, loading, personality)
- ├── Sidebar          — conversation history, grouped by date
- ├── Topbar           — title, export, settings button
- ├── Chat             — message list (Message components)
- │     └── Message
- │           ├── ToolPills  — shows which tools were called
- │           ├── Bubble     — markdown-rendered response
- │           └── Actions    — Copy button, ttft badge
- ├── Composer         — textarea, send/stop, file attach
- └── SettingsModal
-       ├── Personality cards  — tone modifier (appended to system prompt)
-       ├── Custom instructions — full custom system prompt override
-       └── UploadPanel        — CSV/Excel product catalog import
+Both run at the same time ──────────────────────┐
+                                                 │
+OpenRouter /chat ──► GPT-4o-mini decides:        │
+  "Should I call a tool?"                        │
+                                                 │
+OpenRouter /embeddings ──► [1536-dim vector]     │
+  (ready by the time the LLM responds) ──────────┘
 ```
 
-**State persistence:** Conversations are saved to `localStorage` under key `ollama_conversations`. Streaming/loading messages are filtered out before saving.
-
-**Token batching:** Incoming stream tokens are buffered and flushed to the UI every 50ms to avoid excessive React re-renders.
+This parallelism saves ~300–500ms per request.
 
 ---
 
-### 7. Product Upload
+## Step 5 — LLM Decides to Call a Tool (Turn 1)
 
-Users can upload a CSV or Excel file from the Settings modal:
+GPT-4o-mini reads the system prompt + conversation + tool schemas and returns a **tool call decision** (not a text answer):
 
-1. File is parsed server-side (supports `.csv`, `.xlsx`, `.xls`)
-2. Each row is converted to a text blob: `title + brand + category + price + rating + description + features`
-3. Text is embedded via `text-embedding-3-small`
-4. Product + embedding is added to `_product_store` (in memory)
-5. Product is written to Boltic Products Table (persisted)
-6. Progress is streamed back to the browser via NDJSON
-
-**Limits:** 500 rows per upload, 5 MB max file size.
-
----
-
-## API Reference
-
-| Method | Path              | Description                              |
-|--------|-------------------|------------------------------------------|
-| GET    | `/health`         | Health check, returns model + kb_size    |
-| GET    | `/metrics`        | Request counts, TTFT, token stats        |
-| POST   | `/ask/stream`     | Main chat endpoint (SSE streaming)       |
-| POST   | `/generate`       | Simple non-streaming completion          |
-| GET    | `/documents`      | List all products in knowledge base      |
-| POST   | `/documents`      | Manually add a document                  |
-| DELETE | `/documents/{id}` | Remove a document                        |
-| POST   | `/upload`         | Upload CSV/Excel catalog (NDJSON stream) |
-
----
-
-## Environment Variables
-
-| Variable               | Default                    | Description                          |
-|------------------------|----------------------------|--------------------------------------|
-| `OPENROUTER_API_KEY`   | —                          | **Required.** OpenRouter API key     |
-| `MODEL`                | `openai/gpt-4o-mini`       | Chat model                           |
-| `EMBEDDINGS_MODEL`     | `openai/text-embedding-3-small` | Embedding model                 |
-| `PORT`                 | `8080`                     | Server port                          |
-| `WEB_CONCURRENCY`      | `4`                        | Number of uvicorn workers            |
-| `BOLTIC_TOKEN`         | —                          | Boltic API auth token                |
-| `BOLTIC_PRODUCTS_TABLE`| —                          | Products table UUID                  |
-| `BOLTIC_RECS_TABLE`    | —                          | Recommendations table UUID           |
-| `RAG_SIMILARITY_THRESHOLD` | `0.50`                | Min cosine similarity for search     |
-| `RAG_TOP_K`            | `5`                        | Max products returned per search     |
-| `DEFAULT_TEMPERATURE`  | `0.45`                     | LLM temperature                      |
-| `DEFAULT_MAX_TOKENS`   | `2048`                     | Max tokens per response              |
-| `MAX_INPUT_LENGTH`     | `2000`                     | Max user input characters            |
-| `MAX_HISTORY_CHARS`    | `40000`                    | Max conversation history characters  |
-| `ALLOWED_ORIGINS`      | `http://localhost:5173,...` | CORS allowed origins                |
-
----
-
-## Local Development
-
-### Backend
-
-```bash
-cd Backend
-pip install -r requirements.txt
-# create Backend/.env with OPENROUTER_API_KEY etc.
-uvicorn app:app --host 0.0.0.0 --port 8080 --reload
+```json
+{
+  "finish_reason": "tool_calls",
+  "message": {
+    "tool_calls": [{
+      "function": {
+        "name": "search_products",
+        "arguments": "{\"query\": \"shoes\", \"brand\": \"Adidas\", \"max_price\": 200}"
+      }
+    }]
+  }
+}
 ```
 
-Health check: `curl http://localhost:8080/health`
+The LLM extracted:
+- `query = "shoes"` from the message
+- `brand = "Adidas"` because the tool schema says "pass brand when user mentions one"
+- `max_price = 200` because the tool schema says "pass for 'under X'"
 
-### Frontend
-
-```bash
-cd Frontend
-npm install
-npm run dev   # starts at http://localhost:5173
+The backend immediately streams a **tool_call event** to the browser:
+```
+data: {"type": "tool_call", "tool": "search_products", "query": "shoes"}
 ```
 
-The frontend proxies to `http://localhost:8080` by default (`VITE_API_URL` env var).
+The frontend shows: **🔍 Searching catalog** (with a spinner)
 
-### Docker (full stack)
+---
 
-```bash
-docker build -t fynd-ai .
-docker run -p 8080:8080 \
-  -e OPENROUTER_API_KEY=sk-or-... \
-  -e BOLTIC_TOKEN=... \
-  fynd-ai
+## Step 6 — Tool Executes: search_products
+
+The backend runs the tool locally — no extra LLM call needed:
+
+```
+search_products(query="shoes", brand="Adidas", max_price=200)
+    │
+    ├─ 1. filter_pool(brand="Adidas", max_price=200)
+    │       → Scans in-memory catalog
+    │       → Keeps only products where brand contains "adidas" (case-insensitive)
+    │         AND price ≤ 200
+    │       → Returns filtered pool [P002, P005, P011, …]
+    │
+    │       If pool is empty AND category was specified:
+    │       → Retry without category (catalog may use "Sneakers" instead of "Shoes")
+    │       → Falls back to vector search over brand/price filtered pool
+    │
+    ├─ 2. filtered_search(pre_computed_embedding, pool=filtered_pool, top_n=5)
+    │       → Uses the speculative embedding from Step 4 (already computed!)
+    │       → Runs cosine similarity:  dot(query_vec, product_vec) / (|a| × |b|)
+    │       → Returns top 5 Adidas products sorted by semantic similarity
+    │       → No similarity threshold applied (pool is already filtered)
+    │
+    ├─ 3. deduplicate(results)
+    │       → Removes products with identical titles (normalised lowercase)
+    │
+    └─ 4. Build response:
+            [{ id, product_id:"P002", title, details, metadata:{brand,price,…} }, …]
+```
+
+The backend streams a **tool_result event** to the browser:
+```
+data: {"type": "tool_result", "tool": "search_products", "found": true}
+```
+
+The frontend updates the pill: **🔍 Searching catalog ●** (green dot = results found)
+
+---
+
+## Step 7 — Tool Result Injected into Context (Turn 2)
+
+The backend appends the tool result to the message history:
+
+```
+messages = [
+  { role: "system",    content: "You are Fynd AI…" },
+  { role: "user",      content: "Show me Adidas shoes under $200" },
+  { role: "assistant", content: null, tool_calls: [{…}] },
+  { role: "tool",      content: "{\"found\":true, \"products\":[{…5 products…}]}" }
+]
+```
+
+Then sends this to GPT-4o-mini again — this time as a **streaming request**.
+
+---
+
+## Step 8 — LLM Streams the Final Answer (Turn 2)
+
+GPT-4o-mini reads the tool results and generates a conversational response, streaming token by token.
+
+Each token arrives as an SSE event:
+```
+data: {"type": "token", "content": "Here"}
+data: {"type": "token", "content": " are"}
+data: {"type": "token", "content": " some"}
+…
+data: {"type": "done", "ttft_ms": 1843}
 ```
 
 ---
 
-## Deployment (Boltic Serverless)
+## Step 9 — Frontend Renders the Streaming Response
 
-The app deploys automatically on every push to the `boltic` git remote:
+The frontend processes SSE events as they arrive:
 
-```bash
-git push boltic main
+```
+token event → buffered in tokenBufferRef (not rendered yet)
+               ↓
+every 50ms → setInterval flushes buffer to React state
+               ↓
+React re-renders with new text (smooth streaming effect)
 ```
 
-Boltic reads `boltic.yaml` for resource config, builds the Docker image, and deploys to `asia-south1`.
+Batching tokens every 50ms prevents React from re-rendering hundreds of times per second. Without this, typing would be janky on long responses.
 
-**Environment variables** that contain secrets (`OPENROUTER_API_KEY`) must be set manually in the Boltic console under **Settings → Environment variables**.
+The response renders as **Markdown** using `react-markdown`:
+- Product names → bold headings
+- Features → bullet lists  
+- Prices → inline code or plain text
+
+When `done` event arrives:
+- Streaming cursor disappears
+- **TTFT badge** appears (e.g. `1843ms`) — time from request to first token
+- **Copy button** appears
 
 ---
 
-## Key Design Decisions
+## Step 10 — Conversation Saved to localStorage
 
-| Decision | Rationale |
-|----------|-----------|
-| In-memory vector store | No external vector DB dependency; 105 products × 1536 dims = ~2.5 MB, trivially fits in RAM |
-| Speculative embedding | Embeds user query in parallel with Turn-1 LLM call, saving ~200–400 ms per request |
-| Multi-worker uvicorn | 6 workers on 8 cores; each worker independently loads from Boltic on startup |
-| Boltic as persistence | Products survive server restarts; all workers stay in sync via startup reload |
-| SSE over WebSocket | Simpler infrastructure, works through any HTTP proxy, sufficient for one-way streaming |
-| Pure Python cosine sim | Avoids numpy/scipy dependency; fast enough for 105–1000 products |
+After each response, the conversation is saved to `localStorage` with a 1-second debounce:
+
+```javascript
+key: "ollama_conversations"
+value: [{
+  id: "abc123",
+  title: "Show me Adidas shoes under $200",   // ← first user message (truncated to 60 chars)
+  messages: [...],
+  createdAt: 1745123456789,
+  updatedAt: 1745123498123
+}]
+```
+
+Max 50 conversations stored. Loading/streaming messages stripped before saving.
+
+---
+
+## What Happens for "Show me similar products"
+
+If the user asks for recommendations, the flow changes at **Step 5**:
+
+```
+LLM calls: get_recommendations(product_id="P002")
+    │
+    ├─ 1. Lookup P002 in catalog → source product
+    │
+    ├─ 2. Check _recs_index["P002"]
+    │       → Has pre-computed recs from Boltic Recs Table?
+    │
+    │       YES → Return pre-seeded recommendations directly
+    │              (fast, no embedding needed, scored offline by ML pipeline)
+    │
+    │       NO  → Live fallback:
+    │              Run cosine sim of P002's embedding vs every other product
+    │              Same-category products ranked first
+    │              Cross-category fill-up if same-category < 5
+    │
+    └─ 3. Enrich each rec with full product metadata
+```
+
+---
+
+## What Happens for "Show all shoes" (category mismatch case)
+
+The LLM may normalise "shoes" → `category="Shoes"`. But if Boltic products are stored with `category="Sneakers"`, the filter returns zero results.
+
+The backend handles this gracefully:
+
+```
+filter_pool(category="Shoes") → empty pool
+    │
+    └─ Retry: filter_pool(category=None)  ← drop category, keep brand/price filters
+                │
+                └─ vector_search(embedding_of_"shoes")
+                        → cosine similarity finds shoe products semantically
+                        → returns Sneakers, Running Shoes, etc.
+```
+
+---
+
+## What Happens During File Upload
+
+User uploads a CSV from the Settings modal:
+
+```
+POST /upload (multipart/form-data)
+    │
+    ├─ 1. Parse file → list of row dicts
+    │       Supports: .csv (UTF-8), .xlsx, .xls
+    │       Max: 500 rows, 5 MB
+    │
+    ├─ 2. For each row:
+    │       Build text blob: "Nike Air Max by Nike | Category: Shoes | $150 | 4.5/5 | …"
+    │       embed(text) → [1536 floats]          ← OpenRouter API call
+    │       catalog.add(Product)                 ← added to in-memory store
+    │       boltic.create_product(record)         ← persisted to Boltic Table
+    │       yield {"status":"progress", "done":N, "total":M}
+    │
+    └─ 3. yield {"status":"done", "added":N, "skipped":M}
+
+Browser streams NDJSON progress:
+  → Shows "Embedding 3/10" with progress bar
+  → Shows "✓ 10 products added"
+```
+
+Uploaded products are searchable immediately (added to in-memory catalog). They also survive server restarts because they were persisted to Boltic and will be reloaded at next startup.
+
+---
+
+## What Happens Every 5 Minutes (Background Reload)
+
+The periodic reload task in `app.py` keeps the catalog fresh:
+
+```
+asyncio.sleep(300)  ← every 5 minutes
+    │
+    ├─ catalog.reload(http_client)
+    │       → Fetch all products from Boltic
+    │       → Build new list + new P-ID index
+    │       → async with lock:
+    │           self._store = new_list        ← atomic swap (GIL-safe)
+    │           self._pid_index = new_index
+    │
+    └─ catalog.load_recs(http_client)
+            → Re-fetch recommendations table
+            → Atomic swap of _recs_index
+```
+
+While the reload runs, all reads continue uninterrupted — they see the previous `_store` snapshot until the swap completes.
+
+---
+
+## What Happens When You Call /admin/reload
+
+Triggers an immediate catalog reload without waiting 5 minutes:
+
+```
+POST /admin/reload
+  Header: X-Admin-Key: <ADMIN_API_KEY>
+    │
+    └─ Same as periodic reload, returns:
+       {"ok": true, "before": 47, "after": 52}
+```
+
+Useful after adding products to Boltic directly (without the upload endpoint).
+
+---
+
+## Full Request Timeline
+
+```
+t=0ms     User sends "Show me Adidas shoes under $200"
+
+t=5ms     Backend fires embed() and Turn 1 chat() in parallel
+
+t=200ms   Embedding returns [1536 floats] ← ready and waiting
+
+t=450ms   Turn 1 returns: tool_call search_products(brand=Adidas, max_price=200)
+          → SSE: {"type":"tool_call"} → browser shows 🔍 spinner
+
+t=452ms   filter_pool() + filtered_search() run in memory (<1ms)
+          → SSE: {"type":"tool_result", "found":true} → browser shows green dot
+
+t=453ms   Turn 2 streaming request sent to OpenRouter
+
+t=900ms   First token arrives
+          → SSE: {"type":"token", "content":"Here"} → browser starts rendering
+          TTFT = 900ms
+
+t=3200ms  Last token + done event
+          → SSE: {"type":"done", "ttft_ms":900}
+          → TTFT badge shows "900ms"
+```
+
+---
+
+## Summary of All Components
+
+| Component | File | Role |
+|-----------|------|------|
+| Entry point | `app.py` | Wires everything, runs lifespan startup, serves frontend |
+| Chat pipeline | `routers/chat.py` | SSE streaming, tool calling, speculative embedding |
+| Catalog engine | `services/catalog.py` | In-memory vector store, search, reload |
+| LLM + embed | `services/openrouter.py` | HTTP calls to OpenRouter API |
+| Data persistence | `services/boltic.py` | HTTP calls to Boltic Tables API |
+| Admin routes | `routers/admin.py` | /health, /metrics, /admin/reload |
+| Upload pipeline | `routers/upload.py` | CSV/Excel → embed → catalog → Boltic |
+| Manual KB edit | `routers/documents.py` | Add/list/delete single documents |
+| Data models | `models.py` | Product + ProductMetadata dataclasses |
+| Frontend | `Frontend/src/App.jsx` | Entire React UI in one file |
+| Deploy config | `boltic.yaml` | Env vars, resources, scaling |
+| Container | `Dockerfile` | 2-stage: Node build → Python runtime |

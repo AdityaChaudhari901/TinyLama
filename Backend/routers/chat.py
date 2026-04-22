@@ -24,6 +24,22 @@ from routers.admin import _metrics, update_ttft
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+
+def _safe_json(obj) -> str:
+    """Serialize obj to JSON, coercing any non-serializable value to str."""
+    def _sanitize(v):
+        if isinstance(v, dict):
+            return {k: _sanitize(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_sanitize(i) for i in v]
+        if isinstance(v, (str, int, float, bool)) or v is None:
+            return v
+        return str(v)
+    try:
+        return json.dumps(obj)
+    except (TypeError, ValueError):
+        return json.dumps(_sanitize(obj))
+
 # ── Prompt ─────────────────────────────────────────────────────────────────────
 SYSTEM_PERSONALITY = os.getenv(
     "AI_PERSONALITY",
@@ -131,12 +147,23 @@ async def _search_products(
 
     try:
         pool = catalog.filter_pool(brand=brand, category=category, max_price=max_price, min_price=min_price)
+
+        # If category filter wiped the pool, retry without it — category names in the
+        # catalog may not match LLM-normalized names (e.g. "Sneakers" vs "Shoes").
+        # Vector search will still surface the right products semantically.
+        effective_has_filter = has_filter
+        if not pool and category:
+            pool = catalog.filter_pool(brand=brand, category=None, max_price=max_price, min_price=min_price)
+            effective_has_filter = bool(brand or max_price is not None or min_price is not None)
+            if pool:
+                logger.info("[tool:search_products] category=%r matched nothing — falling back to vector search", category)
+
         if not pool:
             return {"found": False, "products": [], "source": "knowledge_base"}
 
         q_emb = _precomputed_embedding or await or_client.embed(http, query)
 
-        if has_filter:
+        if effective_has_filter:
             results = catalog.filtered_search(q_emb, pool=pool, top_n=top_k_n)
         else:
             results = catalog.vector_search(q_emb, top_n=top_k_n)
@@ -320,7 +347,11 @@ async def ask_stream(request: Request, payload: AskIn):
 
                     for tc in tool_calls:
                         fn_name = tc["function"]["name"]
-                        fn_args = json.loads(tc["function"]["arguments"])
+                        try:
+                            fn_args = json.loads(tc["function"]["arguments"])
+                        except json.JSONDecodeError as e:
+                            logger.warning("[%s] malformed tool args for %s: %s", req_id, fn_name, e)
+                            continue
                         arg     = fn_args.get("product_id") or fn_args.get("query", "")
 
                         logger.info("[%s] tool call (round %d): %s(%r)", req_id, _round + 1, fn_name, arg)
@@ -341,7 +372,7 @@ async def ask_stream(request: Request, payload: AskIn):
                         elif fn_name == "get_recommendations": _metrics["tool_calls_recs"] += 1
 
                         yield f"data: {json.dumps({'type': 'tool_result', 'tool': fn_name, 'found': result.get('found', False)})}\n\n"
-                        tool_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": json.dumps(result)})
+                        tool_messages.append({"role": "tool", "tool_call_id": tc["id"], "content": _safe_json(result)})
             else:
                 _metrics["tool_calls_direct"] += 1
                 tool_messages = messages
