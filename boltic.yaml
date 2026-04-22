@@ -46,7 +46,7 @@ serverlessConfig:
         BOLTIC_RECS_TABLE: db2b84be-744e-4e16-a369-d3d7d17b2ec4
         EMBEDDINGS_MODEL: openai/text-embedding-3-small
         MODEL: openai/gpt-4o-mini
-        OPENROUTER_API_KEY: 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
+        OPENROUTER_API_KEY: ""  # Set via secrets manager or deployment env — never hardcode
         DEFAULT_TEMPERATURE: "0.45"
         DEFAULT_MAX_TOKENS: "2048"
         WEB_CONCURRENCY: "6"

@@ -1,5 +1,6 @@
 # Secrets — never commit
 Backend/.env
+Frontend/.env
 
 # Dev / seeding tools (not needed in deployment)
 Backend/seed.py
